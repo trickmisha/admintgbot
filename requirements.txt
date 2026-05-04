@@ -1,0 +1,10 @@
+aiogram>=3.10.0
+aiohttp
+sqlalchemy[asyncio]
+asyncpg
+greenlet
+psycopg2-binary
+python-dotenv
+redis
+fastapi
+uvicorn[standard]
