@@ -148,6 +148,7 @@ def create_api_app(
     async def require_admin(
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, Any]:
+        logger.info("AUTH HEADER: %s", repr(authorization))
         if not authorization or not authorization.lower().startswith("tma "):
             raise HTTPException(status_code=401, detail="Missing or invalid Authorization")
         init_data = authorization[4:].strip()
