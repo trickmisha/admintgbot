@@ -1,10 +1,12 @@
 aiogram>=3.10.0
 aiohttp
-sqlalchemy[asyncio]
+sqlalchemy[asyncio]>=2.0
 asyncpg
 greenlet
 psycopg2-binary
 python-dotenv
 redis
-fastapi
+fastapi>=0.111.0
 uvicorn[standard]
+pydantic>=2.0
+python-multipart
