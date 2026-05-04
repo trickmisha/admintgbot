@@ -788,6 +788,15 @@ async def run_migrations(connection):
         text("ALTER TABLE content_queue ADD COLUMN IF NOT EXISTS button_url TEXT")
     )
 
+@dp.message(F.from_user.id == ADMIN_ID, F.photo | F.video)
+async def admin_get_file_id(message: types.Message):
+    if message.photo:
+        file_id = message.photo[-1].file_id
+        media_type = "photo"
+    else:
+        file_id = message.video.file_id
+        media_type = "video"
+    await message.reply(f"media_type: `{media_type}`\nfile_id: `{file_id}`", parse_mode="Markdown")
 
 async def main():
     import uvicorn
