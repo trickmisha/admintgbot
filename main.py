@@ -247,9 +247,6 @@ def build_welcome_inline_keyboard(settings: dict[str, str]) -> InlineKeyboardMar
         rows.append([InlineKeyboardButton(text=b1t, url=b1u)])
     if b2t and b2u:
         rows.append([InlineKeyboardButton(text=b2t, url=b2u)])
-    rows.append(
-        [InlineKeyboardButton(text="🌐 Mini App", web_app=WebAppInfo(url=MINIAPP_URL))]
-    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
