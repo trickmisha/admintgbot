@@ -30,7 +30,7 @@ async def telegram_with_flood_retry(factory: Callable[[], Awaitable[T]]) -> T:
             await asyncio.sleep(float(e.retry_after) + 0.5)
 
 
-def validate_init_data(init_data: str, bot_token: str, max_age_seconds: int = 86400) -> dict[str, str]:
+def validate_init_data(init_data: str, bot_token: str, max_age_seconds: int = 0) -> dict[str, str]:
     parsed = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
     hash_received = parsed.pop("hash", None)
     if not hash_received:
