@@ -386,14 +386,14 @@ async def cmd_start(message: types.Message):
             await session.commit()
 
     if message.from_user.id == ADMIN_ID:
-    await message.answer("Добро пожаловать, Босс.", reply_markup=get_admin_keyboard())
-    await message.answer(
-        "Панель управления:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🌐 Открыть панель", web_app=WebAppInfo(url=MINIAPP_URL))
-        ]])
-    )
-    return
+        await message.answer("Добро пожаловать, Босс.", reply_markup=get_admin_keyboard())
+        await message.answer(
+            "Панель управления:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🌐 Открыть панель", web_app=WebAppInfo(url=MINIAPP_URL))
+            ]])
+        )
+        return
 
     async with AsyncSessionLocal() as session:
         settings = await fetch_settings_map(session)
