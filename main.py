@@ -143,6 +143,7 @@ class DripMessage(Base):
     button_url = Column(String)
     delay_hours = Column(Integer, default=24)
     is_active = Column(Boolean, default=True)
+    entities = Column(String)
 
 
 class DripProgress(Base):
@@ -376,6 +377,29 @@ async def admin_skip(m: types.Message, state: FSMContext):
     elif current == PostStates.waiting_button_text:
         await state.update_data(button_text=None, button_url=None)
         await _ask_post_time(m, state)
+    elif current == DripStates.editing_text:
+        await state.update_data(drip_new_text=None, drip_new_entities=None)
+        await state.set_state(DripStates.editing_media)
+        await delete_prev_msgs(m.chat.id)
+        msg = await m.answer(
+            "🖼️ Отправьте медиа (фото/видео/аудио) или нажмите *Пропустить*:",
+            parse_mode="Markdown",
+            reply_markup=get_skip_cancel_kb(),
+        )
+        remember_msg(m.chat.id, msg)
+    elif current == DripStates.editing_media:
+        await state.update_data(drip_new_media=None, drip_new_media_type="none")
+        await _drip_ask_button(m, state)
+    elif current == DripStates.editing_button_text:
+        await state.update_data(drip_new_btn_text=None, drip_new_btn_url=None)
+        await state.set_state(DripStates.editing_delay)
+        await delete_prev_msgs(m.chat.id)
+        msg = await m.answer(
+            "⏱ Через сколько часов отправить этот шаг?\nВведите число (например: `24`):",
+            parse_mode="Markdown",
+            reply_markup=get_cancel_kb(),
+        )
+        remember_msg(m.chat.id, msg)
 
 
 # --- /start ---
@@ -1116,7 +1140,11 @@ async def drip_got_text(message: types.Message, state: FSMContext):
         await message.delete()
     except Exception:
         pass
-    await state.update_data(drip_new_text=message.text)
+    import json as _json
+    raw_entities = None
+    if message.entities:
+        raw_entities = _json.dumps([e.model_dump(exclude_none=True) for e in message.entities])
+    await state.update_data(drip_new_text=message.text, drip_new_entities=raw_entities)
     await state.set_state(DripStates.editing_media)
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
@@ -1215,13 +1243,14 @@ async def drip_got_delay(message: types.Message, state: FSMContext):
     new_media_type = data.get("drip_new_media_type", "none")
     new_btn_text = data.get("drip_new_btn_text")
     new_btn_url = data.get("drip_new_btn_url")
+    new_entities = data.get("drip_new_entities")
     await state.clear()
 
     async with AsyncSessionLocal() as session:
         await session.execute(
             text("""
-                INSERT INTO drip_messages (step, text, media_file_id, media_type, button_text, button_url, delay_hours, is_active)
-                VALUES (:s, :t, :m, :mt, :bt, :bu, :dh, true)
+                INSERT INTO drip_messages (step, text, media_file_id, media_type, button_text, button_url, delay_hours, is_active, entities)
+                VALUES (:s, :t, :m, :mt, :bt, :bu, :dh, true, :ent)
                 ON CONFLICT (step) DO UPDATE SET
                     text = EXCLUDED.text,
                     media_file_id = EXCLUDED.media_file_id,
@@ -1229,10 +1258,11 @@ async def drip_got_delay(message: types.Message, state: FSMContext):
                     button_text = EXCLUDED.button_text,
                     button_url = EXCLUDED.button_url,
                     delay_hours = EXCLUDED.delay_hours,
-                    is_active = true
+                    is_active = true,
+                    entities = EXCLUDED.entities
             """),
             {"s": step, "t": new_text, "m": new_media, "mt": new_media_type or "none",
-             "bt": new_btn_text, "bu": new_btn_url, "dh": delay},
+             "bt": new_btn_text, "bu": new_btn_url, "dh": delay, "ent": new_entities},
         )
         await session.commit()
 
@@ -1464,15 +1494,31 @@ async def drip_worker(stop: asyncio.Event):
                         mtype = (dm.media_type or "none").lower()
                         mid = dm.media_file_id
 
+                        import json as _json
+                        from aiogram.types import MessageEntity as _ME
+                        _msg_entities = None
+                        _cap_entities = None
+                        if getattr(dm, 'entities', None):
+                            try:
+                                _raw = _json.loads(dm.entities)
+                                _parsed = [_ME(**e) for e in _raw] if _raw else None
+                                if _parsed:
+                                    if mid:
+                                        _cap_entities = _parsed
+                                    else:
+                                        _msg_entities = _parsed
+                            except Exception:
+                                pass
+
                         try:
                             if mtype == "video" and mid:
-                                await telegram_with_flood_retry(lambda: bot.send_video(uid, video=mid, caption=text_body or None, reply_markup=kb))
+                                await telegram_with_flood_retry(lambda: bot.send_video(uid, video=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_entities))
                             elif mtype == "photo" and mid:
-                                await telegram_with_flood_retry(lambda: bot.send_photo(uid, photo=mid, caption=text_body or None, reply_markup=kb))
+                                await telegram_with_flood_retry(lambda: bot.send_photo(uid, photo=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_entities))
                             elif mtype == "voice" and mid:
-                                await telegram_with_flood_retry(lambda: bot.send_voice(uid, voice=mid, caption=text_body or None, reply_markup=kb))
+                                await telegram_with_flood_retry(lambda: bot.send_voice(uid, voice=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_entities))
                             else:
-                                await telegram_with_flood_retry(lambda: bot.send_message(uid, text_body, reply_markup=kb))
+                                await telegram_with_flood_retry(lambda: bot.send_message(uid, text_body, reply_markup=kb, entities=_msg_entities))
                         except TelegramForbiddenError:
                             urow = await session.get(User, uid)
                             if urow:
@@ -1609,6 +1655,7 @@ async def run_migrations(connection):
     await connection.execute(text("ALTER TABLE content_queue ADD COLUMN IF NOT EXISTS button_text TEXT"))
     await connection.execute(text("ALTER TABLE content_queue ADD COLUMN IF NOT EXISTS button_url TEXT"))
     await connection.execute(text("ALTER TABLE content_queue ADD COLUMN IF NOT EXISTS media_type TEXT DEFAULT 'photo'"))
+    await connection.execute(text("ALTER TABLE drip_messages ADD COLUMN IF NOT EXISTS entities TEXT"))
 
 
 async def main():
