@@ -148,26 +148,28 @@ def create_api_app(
             yield session
 
     async def require_admin(
-        authorization: Annotated[str | None, Header()] = None,
-    ) -> dict[str, Any]:
-        logger.info("AUTH HEADER: %s", repr(authorization))
-        if not authorization or not authorization.lower().startswith("tma "):
-            raise HTTPException(status_code=401, detail="Missing or invalid Authorization")
-        init_data = authorization[4:].strip()
-        try:
-            data = validate_init_data(init_data, bot_token)
-        except ValueError as e:
-            raise HTTPException(status_code=401, detail=str(e)) from e
-        user_raw = data.get("user")
-        if not user_raw:
-            raise HTTPException(status_code=401, detail="Missing user in init data")
-        try:
-            user = json.loads(user_raw)
-        except json.JSONDecodeError as e:
-            raise HTTPException(status_code=401, detail="Invalid user json") from e
-        if int(user.get("id", 0)) != admin_id:
-            raise HTTPException(status_code=403, detail="Admin only")
-        return user
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
+    logger.info("AUTH HEADER: %s", repr(authorization))
+    if not authorization or not authorization.lower().startswith("tma "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization")
+    init_data = authorization[4:].strip()
+    try:
+        data = validate_init_data(init_data, bot_token)
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=str(e)) from e
+    user_raw = data.get("user")
+    if not user_raw:
+        raise HTTPException(status_code=401, detail="Missing user in init data")
+    try:
+        user = json.loads(user_raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=401, detail="Invalid user json") from e
+
+    user_id = int(user.get("id", 0))
+    if not is_admin(user_id):          # ← теперь проверяет всех админов
+        raise HTTPException(status_code=403, detail="Admin only")
+    return user
 
     Admin = Annotated[dict[str, Any], Depends(require_admin)]
     Db = Annotated[AsyncSession, Depends(get_db)]
