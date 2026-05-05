@@ -51,6 +51,10 @@ PORT = int(_require_env("PORT"))
 
 REDIS_URL = os.getenv("REDIS_URL")
 
+# Часовой пояс админа. Томск = UTC+7.
+# Чтобы сменить: в Render → Environment Variables добавь TIMEZONE_OFFSET=7
+TIMEZONE_OFFSET = int(os.getenv("TIMEZONE_OFFSET", "7"))
+
 # --- Мульти-админ ---
 # Чтобы добавить второго админа: в Render → Environment Variables
 # добавь ADMIN_IDS=123456789,987654321 (через запятую, без пробелов)
@@ -724,14 +728,17 @@ async def post_got_custom_time(message: types.Message, state: FSMContext):
         pass
     try:
         dt = datetime.strptime(message.text.strip(), "%d.%m.%Y %H:%M")
+        # Конвертируем из локального времени (Томск UTC+7) в UTC
+        dt_utc = dt - timedelta(hours=TIMEZONE_OFFSET)
     except ValueError:
         msg = await message.answer(
-            "❌ Неверный формат. Попробуйте ещё раз:\n`ДД.ММ.ГГГГ ЧЧ:ММ`",
+            "❌ Неверный формат. Попробуйте ещё раз:\n`ДД.ММ.ГГГГ ЧЧ:ММ`\n\nВремя по-томски (UTC+7)",
             parse_mode="Markdown",
         )
         remember_msg(message.chat.id, msg)
         return
-    await state.update_data(publish_now=False, scheduled_at=dt)
+    # Сохраняем как строку — Redis не умеет сериализовать datetime напрямую
+    await state.update_data(publish_now=False, scheduled_at=dt_utc.isoformat())
     await _show_post_preview(message, state)
 
 
@@ -747,7 +754,10 @@ async def _show_post_preview(message: types.Message, state: FSMContext):
     button_text = data.get("button_text")
     button_url = data.get("button_url")
     publish_now = data.get("publish_now", True)
-    scheduled_at = data.get("scheduled_at")
+    scheduled_at_raw = data.get("scheduled_at")
+    scheduled_at = datetime.fromisoformat(scheduled_at_raw) if scheduled_at_raw else None
+    # Переводим в локальное время для отображения
+    scheduled_at_local = (scheduled_at + timedelta(hours=TIMEZONE_OFFSET)) if scheduled_at else None
 
     # Строим клавиатуру превью
     preview_kb = None
@@ -757,10 +767,11 @@ async def _show_post_preview(message: types.Message, state: FSMContext):
         ]])
 
     # Показываем превью
+    time_str = "сейчас" if publish_now else (scheduled_at_local.strftime("%d.%m.%Y %H:%M") + " (Томск)" if scheduled_at_local else "—")
     info = (
         f"👁 *Превью поста*\n\n"
         f"📡 Канал: *{'Free' if channel == 'free' else 'Paid'}*\n"
-        f"⏰ {'Публикация: сейчас' if publish_now else f'Запланировано: {scheduled_at.strftime(chr(37)+chr(100)+chr(46)+chr(37)+chr(109)+chr(46)+chr(37)+chr(89)+chr(32)+chr(37)+chr(72)+chr(58)+chr(37)+chr(77))}'}\n\n"
+        f"⏰ {'Публикация: ' + time_str}\n\n"
         f"Так будет выглядеть пост:"
     )
     msg_info = await message.answer(info, parse_mode="Markdown")
@@ -819,7 +830,9 @@ async def post_confirm(query: types.CallbackQuery, state: FSMContext):
     button_text = data.get("button_text")
     button_url = data.get("button_url")
     publish_now = data.get("publish_now", True)
-    scheduled_at = data.get("scheduled_at")
+    scheduled_at_raw = data.get("scheduled_at")
+    scheduled_at = datetime.fromisoformat(scheduled_at_raw) if scheduled_at_raw else None
+    scheduled_at_local = (scheduled_at + timedelta(hours=TIMEZONE_OFFSET)) if scheduled_at else None
 
     now = datetime.now(UTC).replace(tzinfo=None)
     sched = now if publish_now else scheduled_at
@@ -840,7 +853,8 @@ async def post_confirm(query: types.CallbackQuery, state: FSMContext):
     if publish_now:
         result_text = "✅ *Пост добавлен в очередь на публикацию!*\nБудет опубликован в течение минуты."
     else:
-        result_text = f"🕐 *Пост запланирован*\nДата: `{scheduled_at.strftime('%d.%m.%Y %H:%M')}`"
+        dt_str = scheduled_at_local.strftime("%d.%m.%Y %H:%M") if scheduled_at_local else "—"
+        result_text = f"🕐 *Пост запланирован*\nДата: `{dt_str}` (Томск)"
 
     msg = await query.message.answer(result_text, parse_mode="Markdown", reply_markup=get_admin_keyboard())
     remember_msg(query.message.chat.id, msg)
