@@ -313,7 +313,7 @@ async def handle_join_request(event: ChatJoinRequest):
             await session.merge(
                 DripProgress(
                     user_id=event.from_user.id,
-                    current_step=0,
+                    current_step=1,
                     next_send_at=next_at,
                     is_active=True,
                 )
@@ -326,6 +326,24 @@ async def handle_join_request(event: ChatJoinRequest):
             welcome,
             reply_markup=markup,
         )
+        # отправляем step 0 drip сразу при вступлении
+        if dm:
+            kb = None
+            if (dm.button_text or "").strip() and (dm.button_url or "").strip():
+                kb = InlineKeyboardMarkup(
+                    inline_keyboard=[[
+                        InlineKeyboardButton(text=dm.button_text, url=dm.button_url)
+                    ]]
+                )
+            text_body = dm.text or ""
+            mtype = (dm.media_type or "none").lower()
+            mid = dm.media_file_id
+            if mtype == "video" and mid:
+                await bot.send_video(event.from_user.id, video=mid, caption=text_body or None, reply_markup=kb)
+            elif mtype == "photo" and mid:
+                await bot.send_photo(event.from_user.id, photo=mid, caption=text_body or None, reply_markup=kb)
+            elif text_body:
+                await bot.send_message(event.from_user.id, text_body, reply_markup=kb)
     except TelegramForbiddenError:
         async with AsyncSessionLocal() as session:
             u = await session.get(User, event.from_user.id)
@@ -384,6 +402,12 @@ async def cmd_start(message: types.Message):
                 )
             )
             await session.commit()
+
+    # удаляем команду /start чтобы не засорять чат
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
     if message.from_user.id == ADMIN_ID:
         await message.answer("Добро пожаловать, Босс.", reply_markup=get_admin_keyboard())
@@ -727,7 +751,7 @@ async def check_scheduled_posts(stop: asyncio.Event):
                                         reply_markup=reply_markup,
                                     )
                                 )
-                            else:
+                            elif post.get("media_id"):
                                 await telegram_with_flood_retry(
                                     lambda: bot.send_photo(
                                         chat_id=target,
@@ -736,6 +760,17 @@ async def check_scheduled_posts(stop: asyncio.Event):
                                         reply_markup=reply_markup,
                                     )
                                 )
+                            elif post.get("text"):
+                                await telegram_with_flood_retry(
+                                    lambda: bot.send_message(
+                                        chat_id=target,
+                                        text=post["text"],
+                                        reply_markup=reply_markup,
+                                    )
+                                )
+                            else:
+                                logging.error(f"Post id={post_id} has no text or media, skipping")
+                                continue
                         except Exception as e:
                             logging.error(f"Post error id={post_id}: {e}")
                             continue
