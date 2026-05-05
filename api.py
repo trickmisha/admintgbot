@@ -107,10 +107,11 @@ class BroadcastBody(BaseModel):
 class PostCreateBody(BaseModel):
     channel: Literal["free", "paid"]
     text: str | None = None
-    media_id: str
+    media_id: str | None = None
     button_text: str | None = None
     button_url: str | None = None
-    scheduled_at: datetime
+    scheduled_at: datetime | None = None
+    publish_now: bool = False
 
 
 class PostOut(BaseModel):
@@ -170,7 +171,7 @@ def create_api_app(
     Admin = Annotated[dict[str, Any], Depends(require_admin)]
     Db = Annotated[AsyncSession, Depends(get_db)]
 
-    @app.get("/")
+    @app.api_route("/", methods=["GET", "HEAD"])
     async def health():
         return {"ok": True}
 
@@ -448,9 +449,17 @@ def create_api_app(
 
     @app.post("/api/posts", response_model=PostOut)
     async def api_posts_create(body: PostCreateBody, _admin: Admin, db: Db):
-        sched = body.scheduled_at
-        if sched.tzinfo is not None:
-            sched = sched.astimezone(UTC).replace(tzinfo=None)
+        if not (body.text or "").strip() and not (body.media_id or "").strip():
+            raise HTTPException(status_code=400, detail="text or media_id is required")
+        now = datetime.now(UTC).replace(tzinfo=None)
+        if body.publish_now:
+            sched = now
+        elif body.scheduled_at:
+            sched = body.scheduled_at
+            if sched.tzinfo is not None:
+                sched = sched.astimezone(UTC).replace(tzinfo=None)
+        else:
+            raise HTTPException(status_code=400, detail="scheduled_at or publish_now is required")
         post_type = "free"
         await db.execute(
             text(
