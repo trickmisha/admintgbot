@@ -657,6 +657,29 @@ async def post_got_media(message: types.Message, state: FSMContext):
     await _ask_post_text(message, state)
 
 
+@dp.message(PostStates.waiting_media, F.document)
+async def post_got_media_document(message: types.Message, state: FSMContext):
+    """Ловим OGG/аудио отправленные как документ"""
+    if not is_admin(message.from_user.id):
+        return
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    doc = message.document
+    mime = (doc.mime_type or "").lower()
+    fname = (doc.file_name or "").lower()
+    if "ogg" in mime or "audio" in mime or "opus" in mime or fname.endswith((".ogg", ".opus", ".mp3", ".m4a")):
+        media_id = doc.file_id
+        media_type = "voice"
+    else:
+        msg = await message.answer("⚠️ Неподдерживаемый тип. Отправьте фото, видео или OGG аудио.")
+        remember_msg(message.chat.id, msg)
+        return
+    await state.update_data(media_id=media_id, media_type=media_type)
+    await _ask_post_text(message, state)
+
+
 @dp.message(PostStates.waiting_text)
 async def post_got_text(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
@@ -841,11 +864,11 @@ async def post_confirm(query: types.CallbackQuery, state: FSMContext):
         await session.execute(
             text(
                 "INSERT INTO content_queue "
-                "(text, media_id, price, post_type, channel, button_text, button_url, scheduled_at, status) "
-                "VALUES (:text, :mid, 0, 'free', :ch, :bt, :bu, :sa, 'pending')"
+                "(text, media_id, price, post_type, channel, button_text, button_url, scheduled_at, status, media_type) "
+                "VALUES (:text, :mid, 0, 'free', :ch, :bt, :bu, :sa, 'pending', :mt)"
             ),
             {"text": post_text, "mid": media_id, "ch": channel,
-             "bt": button_text, "bu": button_url, "sa": sched},
+             "bt": button_text, "bu": button_url, "sa": sched, "mt": data.get("media_type")},
         )
         await session.commit()
 
@@ -1506,7 +1529,7 @@ async def check_scheduled_posts(stop: asyncio.Event):
                         continue
                     try:
                         row = (await session.execute(
-                            text("SELECT id, text, media_id, price, post_type, channel, button_text, button_url FROM content_queue WHERE id = :id AND status = 'pending' AND scheduled_at <= :now"),
+                            text("SELECT id, text, media_id, media_type, price, post_type, channel, button_text, button_url FROM content_queue WHERE id = :id AND status = 'pending' AND scheduled_at <= :now"),
                             {"id": post_id, "now": now},
                         )).mappings().first()
                         if not row:
@@ -1524,25 +1547,34 @@ async def check_scheduled_posts(stop: asyncio.Event):
                             ]])
 
                         try:
+                            mtype = (post.get("media_type") or "photo").lower()
+                            mid = post.get("media_id")
                             if post.get("post_type") == "paid":
                                 await telegram_with_flood_retry(lambda: bot.send_paid_media(
                                     chat_id=target,
                                     star_count=post["price"] or 0,
-                                    media=[InputPaidMediaPhoto(media=post["media_id"])],
+                                    media=[InputPaidMediaPhoto(media=mid)],
                                     caption=post.get("text"),
                                     reply_markup=reply_markup,
                                 ))
-                            elif post.get("media_id"):
+                            elif mid and mtype == "video":
+                                await telegram_with_flood_retry(lambda: bot.send_video(
+                                    chat_id=target, video=mid,
+                                    caption=post.get("text"), reply_markup=reply_markup,
+                                ))
+                            elif mid and mtype == "voice":
+                                await telegram_with_flood_retry(lambda: bot.send_voice(
+                                    chat_id=target, voice=mid,
+                                    caption=post.get("text"), reply_markup=reply_markup,
+                                ))
+                            elif mid:
                                 await telegram_with_flood_retry(lambda: bot.send_photo(
-                                    chat_id=target,
-                                    photo=post["media_id"],
-                                    caption=post.get("text"),
-                                    reply_markup=reply_markup,
+                                    chat_id=target, photo=mid,
+                                    caption=post.get("text"), reply_markup=reply_markup,
                                 ))
                             elif post.get("text"):
                                 await telegram_with_flood_retry(lambda: bot.send_message(
-                                    chat_id=target,
-                                    text=post["text"],
+                                    chat_id=target, text=post["text"],
                                     reply_markup=reply_markup,
                                 ))
                             else:
@@ -1576,6 +1608,7 @@ async def run_migrations(connection):
     await connection.execute(text("ALTER TABLE content_queue ADD COLUMN IF NOT EXISTS channel TEXT DEFAULT 'free'"))
     await connection.execute(text("ALTER TABLE content_queue ADD COLUMN IF NOT EXISTS button_text TEXT"))
     await connection.execute(text("ALTER TABLE content_queue ADD COLUMN IF NOT EXISTS button_url TEXT"))
+    await connection.execute(text("ALTER TABLE content_queue ADD COLUMN IF NOT EXISTS media_type TEXT DEFAULT 'photo'"))
 
 
 async def main():
