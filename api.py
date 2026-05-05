@@ -147,7 +147,7 @@ def create_api_app(
         async with session_factory() as session:
             yield session
 
-        async def require_admin(
+    async def require_admin(
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, Any]:
         logger.info("AUTH HEADER: %s", repr(authorization))
