@@ -144,6 +144,8 @@ class DripMessage(Base):
     media_type = Column(String)
     button_text = Column(String)
     button_url = Column(String)
+    button2_text = Column(String)  # Вторая кнопка (только для шага 0)
+    button2_url = Column(String)   # Вторая кнопка (только для шага 0)
     delay_hours = Column(Integer, default=24)
     is_active = Column(Boolean, default=True)
     entities = Column(String)  # JSON-сериализованные MessageEntity для кастомных эмодзи
@@ -155,16 +157,6 @@ class DripProgress(Base):
     current_step = Column(Integer, default=0)
     next_send_at = Column(DateTime)
     is_active = Column(Boolean, default=True)
-
-
-class Broadcast(Base):
-    __tablename__ = "broadcasts"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    text = Column(String)
-    media_file_id = Column(String)
-    target = Column(String)
-    status = Column(String, default="pending")
-    created_at = Column(DateTime, default=lambda: datetime.now(UTC).replace(tzinfo=None))
 
 
 engine = create_async_engine(
@@ -226,6 +218,7 @@ async def redis_get_all_drip_steps() -> list[dict]:
                 "step": s, "text": None, "entities": None,
                 "media_file_id": None, "media_type": "none",
                 "button_text": None, "button_url": None,
+                "button2_text": None, "button2_url": None,
                 "delay_hours": 24, "is_active": True,
             })
     return steps
@@ -254,6 +247,8 @@ class DripStates(StatesGroup):
     editing_media = State()
     editing_button_text = State()
     editing_button_url = State()
+    editing_button2_text = State()
+    editing_button2_url = State()
     editing_delay = State()
 
 
@@ -423,6 +418,9 @@ async def admin_skip(m: types.Message, state: FSMContext):
     elif current == PostStates.waiting_button_text:
         await state.update_data(button_text=None, button_url=None)
         await _ask_post_time(m, state)
+    elif current == PostStates.waiting_button_url:
+        await state.update_data(button_url=None)
+        await _ask_post_time(m, state)
     # DripStates
     elif current == DripStates.editing_text:
         await state.update_data(drip_new_text=None, drip_new_entities=None)
@@ -437,14 +435,12 @@ async def admin_skip(m: types.Message, state: FSMContext):
         await state.update_data(drip_new_media=None, drip_new_media_type=None)
         await _drip_ask_button(m, state)
     elif current == DripStates.editing_button_text:
-        await state.update_data(drip_new_btn_text=None, drip_new_btn_url=None)
-        await state.set_state(DripStates.editing_delay)
-        await delete_prev_msgs(m.chat.id)
-        msg = await m.answer(
-            "⏱ Через сколько часов отправить шаг?\nВведите число (например: `24`):",
-            parse_mode="Markdown", reply_markup=get_cancel_kb(),
-        )
-        remember_msg(m.chat.id, msg)
+        await state.update_data(drip_new_btn_text=None, drip_new_btn_url=None,
+                                drip_new_btn2_text=None, drip_new_btn2_url=None)
+        await _drip_ask_delay(m, state)
+    elif current == DripStates.editing_button2_text:
+        await state.update_data(drip_new_btn2_text=None, drip_new_btn2_url=None)
+        await _drip_ask_delay(m, state)
 
 
 # --- /start ---
@@ -1055,7 +1051,7 @@ async def drip_view_step(query: types.CallbackQuery, state: FSMContext):
         info = (
             f"💧 *Шаг {step}*\n\n"
             f"Статус: {status}\n"
-            f"Задержка: `{row.get('delay_hours', 24)}` ч\n"
+            f"Задержка: `{'5 мин (фиксировано)' if step == 0 else str(row.get('delay_hours', 24)) + ' ч'}`\n"
             f"Медиа: `{row.get('media_type') or 'нет'}`\n\n"
             f"Текст:\n{row.get('text') or '_(нет)_'}"
         )
@@ -1107,10 +1103,17 @@ async def drip_preview(query: types.CallbackQuery, state: FSMContext):
         return
 
     kb = None
-    if (row.get("button_text") or "").strip() and (row.get("button_url") or "").strip():
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text=row["button_text"], url=row["button_url"])
-        ]])
+    btn1t = (row.get("button_text") or "").strip()
+    btn1u = (row.get("button_url") or "").strip()
+    btn2t = (row.get("button2_text") or "").strip()
+    btn2u = (row.get("button2_url") or "").strip()
+    rows_kb = []
+    if btn1t and btn1u:
+        rows_kb.append([InlineKeyboardButton(text=btn1t, url=btn1u)])
+    if btn2t and btn2u:
+        rows_kb.append([InlineKeyboardButton(text=btn2t, url=btn2u)])
+    if rows_kb:
+        kb = InlineKeyboardMarkup(inline_keyboard=rows_kb)
 
     # Десериализуем entities для кастомных эмодзи
     cap_ent = None
@@ -1234,6 +1237,17 @@ async def _drip_ask_button(message: types.Message, state: FSMContext):
     remember_msg(message.chat.id, msg)
 
 
+async def _drip_ask_delay(message: types.Message, state: FSMContext):
+    await state.set_state(DripStates.editing_delay)
+    await delete_prev_msgs(message.chat.id)
+    msg = await message.answer(
+        "⏱ Через сколько часов отправить этот шаг после предыдущего?\nВведите число (например: `24`):",
+        parse_mode="Markdown",
+        reply_markup=get_cancel_kb(),
+    )
+    remember_msg(message.chat.id, msg)
+
+
 @dp.message(DripStates.editing_button_text)
 async def drip_got_button_text(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
@@ -1258,14 +1272,49 @@ async def drip_got_button_url(message: types.Message, state: FSMContext):
     except Exception:
         pass
     await state.update_data(drip_new_btn_url=message.text)
-    await state.set_state(DripStates.editing_delay)
+
+    data = await state.get_data()
+    step = data.get("drip_editing_step", 0)
+
+    # Для шага 0 предлагаем настроить вторую кнопку
+    if step == 0:
+        await state.set_state(DripStates.editing_button2_text)
+        await delete_prev_msgs(message.chat.id)
+        msg = await message.answer(
+            "🔘 *Шаг 0 поддерживает 2 кнопки.*\n\nВведите текст второй кнопки или нажмите *Пропустить*:",
+            parse_mode="Markdown",
+            reply_markup=get_skip_cancel_kb(),
+        )
+        remember_msg(message.chat.id, msg)
+    else:
+        await _drip_ask_delay(message, state)
+
+
+@dp.message(DripStates.editing_button2_text)
+async def drip_got_button2_text(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await state.update_data(drip_new_btn2_text=message.text)
+    await state.set_state(DripStates.editing_button2_url)
     await delete_prev_msgs(message.chat.id)
-    msg = await message.answer(
-        "⏱ Через сколько часов отправить этот шаг после предыдущего?\nВведите число (например: `24`):",
-        parse_mode="Markdown",
-        reply_markup=get_cancel_kb(),
-    )
+    msg = await message.answer("🔗 Введите URL второй кнопки:", reply_markup=get_cancel_kb())
     remember_msg(message.chat.id, msg)
+
+
+@dp.message(DripStates.editing_button2_url)
+async def drip_got_button2_url(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await state.update_data(drip_new_btn2_url=message.text)
+    await _drip_ask_delay(message, state)
 
 
 @dp.message(DripStates.editing_delay)
@@ -1291,6 +1340,8 @@ async def drip_got_delay(message: types.Message, state: FSMContext):
     new_media_type = data.get("drip_new_media_type", "none")
     new_btn_text = data.get("drip_new_btn_text")
     new_btn_url = data.get("drip_new_btn_url")
+    new_btn2_text = data.get("drip_new_btn2_text")
+    new_btn2_url = data.get("drip_new_btn2_url")
     await state.clear()
 
     # Сохраняем в Redis
@@ -1302,6 +1353,8 @@ async def drip_got_delay(message: types.Message, state: FSMContext):
         "media_type": new_media_type or "none",
         "button_text": new_btn_text,
         "button_url": new_btn_url,
+        "button2_text": new_btn2_text,
+        "button2_url": new_btn2_url,
         "delay_hours": delay,
         "is_active": existing.get("is_active", True),
     }
@@ -1376,48 +1429,26 @@ async def handle_join_request(event: ChatJoinRequest):
 
     if dm_active:
         async with AsyncSessionLocal() as session:
-            next_at = now_naive + timedelta(hours=dm.get("delay_hours") or 24)
-            await session.merge(DripProgress(
-                user_id=event.from_user.id,
-                current_step=1,
-                next_send_at=next_at,
-                is_active=True,
-            ))
-            await session.commit()
+            # Баг 2: не запускаем drip если юзер уже VIP
+            existing_user = await session.get(User, event.from_user.id)
+            if existing_user and existing_user.is_vip:
+                pass  # VIP — drip не нужен
+            else:
+                # Баг 5: не сбрасываем прогресс если цепочка уже активна
+                existing_prog = await session.get(DripProgress, event.from_user.id)
+                if not existing_prog or not existing_prog.is_active:
+                    next_at = now_naive + timedelta(minutes=5)
+                    await session.merge(DripProgress(
+                        user_id=event.from_user.id,
+                        current_step=0,
+                        next_send_at=next_at,
+                        is_active=True,
+                    ))
+                    await session.commit()
 
     try:
         await bot.send_message(event.from_user.id, welcome, reply_markup=markup)
-        # Отправляем step 0 сразу
-        if dm_active:
-            kb = None
-            if (dm.get("button_text") or "").strip() and (dm.get("button_url") or "").strip():
-                kb = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text=dm["button_text"], url=dm["button_url"])
-                ]])
-            text_body = dm.get("text") or ""
-            mtype = (dm.get("media_type") or "none").lower()
-            mid = dm.get("media_file_id")
-            _cap_ent = None
-            _msg_ent = None
-            if dm.get("entities"):
-                try:
-                    _raw = json.loads(dm["entities"])
-                    _parsed = [MessageEntity(**e) for e in _raw] if _raw else None
-                    if _parsed:
-                        if mid:
-                            _cap_ent = _parsed
-                        else:
-                            _msg_ent = _parsed
-                except Exception:
-                    pass
-            if mtype == "video" and mid:
-                await bot.send_video(event.from_user.id, video=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_ent)
-            elif mtype == "photo" and mid:
-                await bot.send_photo(event.from_user.id, photo=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_ent)
-            elif mtype == "voice" and mid:
-                await bot.send_voice(event.from_user.id, voice=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_ent)
-            elif text_body:
-                await bot.send_message(event.from_user.id, text_body, reply_markup=kb, entities=_msg_ent)
+        # Step 0 отправляется воркером через 5 минут — здесь ничего не шлём
     except TelegramForbiddenError:
         async with AsyncSessionLocal() as session:
             u = await session.get(User, event.from_user.id)
@@ -1570,10 +1601,17 @@ async def drip_worker(stop: asyncio.Event):
                             continue
 
                         kb = None
-                        if (dm.get("button_text") or "").strip() and (dm.get("button_url") or "").strip():
-                            kb = InlineKeyboardMarkup(inline_keyboard=[[
-                                InlineKeyboardButton(text=dm["button_text"], url=dm["button_url"])
-                            ]])
+                        btn1t = (dm.get("button_text") or "").strip()
+                        btn1u = (dm.get("button_url") or "").strip()
+                        btn2t = (dm.get("button2_text") or "").strip()
+                        btn2u = (dm.get("button2_url") or "").strip()
+                        rows = []
+                        if btn1t and btn1u:
+                            rows.append([InlineKeyboardButton(text=btn1t, url=btn1u)])
+                        if btn2t and btn2u:
+                            rows.append([InlineKeyboardButton(text=btn2t, url=btn2u)])
+                        if rows:
+                            kb = InlineKeyboardMarkup(inline_keyboard=rows)
                         text_body = dm.get("text") or ""
                         mtype = (dm.get("media_type") or "none").lower()
                         mid = dm.get("media_file_id")
@@ -1595,13 +1633,13 @@ async def drip_worker(stop: asyncio.Event):
 
                         try:
                             if mtype == "video" and mid:
-                                await telegram_with_flood_retry(lambda: bot.send_video(uid, video=mid, caption=text_body or None, reply_markup=kb, caption_entities=cap_entities))
+                                await telegram_with_flood_retry(lambda u=uid, m=mid, t=text_body, k=kb, ce=cap_entities: bot.send_video(u, video=m, caption=t or None, reply_markup=k, caption_entities=ce))
                             elif mtype == "photo" and mid:
-                                await telegram_with_flood_retry(lambda: bot.send_photo(uid, photo=mid, caption=text_body or None, reply_markup=kb, caption_entities=cap_entities))
+                                await telegram_with_flood_retry(lambda u=uid, m=mid, t=text_body, k=kb, ce=cap_entities: bot.send_photo(u, photo=m, caption=t or None, reply_markup=k, caption_entities=ce))
                             elif mtype == "voice" and mid:
-                                await telegram_with_flood_retry(lambda: bot.send_voice(uid, voice=mid, caption=text_body or None, reply_markup=kb, caption_entities=cap_entities))
+                                await telegram_with_flood_retry(lambda u=uid, m=mid, t=text_body, k=kb, ce=cap_entities: bot.send_voice(u, voice=m, caption=t or None, reply_markup=k, caption_entities=ce))
                             else:
-                                await telegram_with_flood_retry(lambda: bot.send_message(uid, text_body, reply_markup=kb, entities=msg_entities))
+                                await telegram_with_flood_retry(lambda u=uid, t=text_body, k=kb, me=msg_entities: bot.send_message(u, t, reply_markup=k, entities=me))
                         except TelegramForbiddenError:
                             urow = await session.get(User, uid)
                             if urow:
@@ -1629,7 +1667,7 @@ async def drip_worker(stop: asyncio.Event):
             raise
         except Exception as e:
             logging.error("Drip worker error", exc_info=True)
-        await interruptible_sleep(300.0, stop)
+        await interruptible_sleep(60.0, stop)
 
 
 async def check_scheduled_posts(stop: asyncio.Event):
@@ -1735,6 +1773,8 @@ async def run_migrations(connection):
     await connection.execute(text("ALTER TABLE content_queue ADD COLUMN IF NOT EXISTS button_url TEXT"))
     await connection.execute(text("ALTER TABLE content_queue ADD COLUMN IF NOT EXISTS media_type TEXT DEFAULT 'photo'"))
     await connection.execute(text("ALTER TABLE drip_messages ADD COLUMN IF NOT EXISTS entities TEXT"))
+    await connection.execute(text("ALTER TABLE drip_messages ADD COLUMN IF NOT EXISTS button2_text TEXT"))
+    await connection.execute(text("ALTER TABLE drip_messages ADD COLUMN IF NOT EXISTS button2_url TEXT"))
 
 
 async def main():
