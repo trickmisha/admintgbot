@@ -188,6 +188,49 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=storage)
 
 
+# ─── Redis keys для drip контента ────────────────────────────────────────────
+# Структура: drip:step:{N} → JSON {text, entities, media_file_id, media_type,
+#                                   button_text, button_url, delay_hours, is_active}
+
+def _drip_key(step: int) -> str:
+    return f"drip:step:{step}"
+
+
+async def redis_get_drip_step(step: int) -> dict | None:
+    """Читает drip шаг из Redis."""
+    if _redis_client is None:
+        return None
+    raw = await _redis_client.get(_drip_key(step))
+    if not raw:
+        return None
+    return json.loads(raw)
+
+
+async def redis_set_drip_step(step: int, data: dict) -> None:
+    """Сохраняет drip шаг в Redis."""
+    if _redis_client is None:
+        return
+    await _redis_client.set(_drip_key(step), json.dumps(data, ensure_ascii=False))
+
+
+async def redis_get_all_drip_steps() -> list[dict]:
+    """Возвращает все шаги 0-4 из Redis."""
+    steps = []
+    for s in range(5):
+        d = await redis_get_drip_step(s)
+        if d:
+            d["step"] = s
+            steps.append(d)
+        else:
+            steps.append({
+                "step": s, "text": None, "entities": None,
+                "media_file_id": None, "media_type": "none",
+                "button_text": None, "button_url": None,
+                "delay_hours": 24, "is_active": True,
+            })
+    return steps
+
+
 # --- FSM States ---
 class AdminStates(StatesGroup):
     # Broadcast
@@ -974,22 +1017,18 @@ async def admin_drip_menu(message: types.Message, state: FSMContext):
     except Exception:
         pass
     await state.clear()
-    async with AsyncSessionLocal() as session:
-        rows = (await session.execute(
-            text("SELECT step, text, media_type, is_active, delay_hours FROM drip_messages ORDER BY step")
-        )).mappings().all()
-    by_step = {r["step"]: r for r in rows}
+    steps = await redis_get_all_drip_steps()
 
     buttons = []
-    for s in range(5):
-        r = by_step.get(s)
-        if r:
-            status = "✅" if r["is_active"] else "⏸"
-            preview = (r["text"] or "")[:20] or f"[{r['media_type'] or 'медиа'}]"
-            label = f"{status} Шаг {s} · {r['delay_hours']}ч · {preview}"
+    for s in steps:
+        step_num = s["step"]
+        if s.get("text") or s.get("media_file_id"):
+            status = "✅" if s.get("is_active", True) else "⏸"
+            preview = (s.get("text") or "")[:20] or f"[{s.get('media_type') or 'медиа'}]"
+            label = f"{status} Шаг {step_num} · {s.get('delay_hours', 24)}ч · {preview}"
         else:
-            label = f"➕ Шаг {s} (не настроен)"
-        buttons.append([InlineKeyboardButton(text=label, callback_data=f"drip_step_{s}")])
+            label = f"➕ Шаг {step_num} (не настроен)"
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"drip_step_{step_num}")])
 
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
@@ -1007,24 +1046,20 @@ async def drip_view_step(query: types.CallbackQuery, state: FSMContext):
     step = int(query.data.split("_")[-1])
     await state.update_data(drip_editing_step=step)
 
-    async with AsyncSessionLocal() as session:
-        row = (await session.execute(
-            text("SELECT * FROM drip_messages WHERE step = :s"),
-            {"s": step}
-        )).mappings().first()
+    row = await redis_get_drip_step(step)
 
     await delete_prev_msgs(query.message.chat.id)
 
-    if row:
-        status = "✅ Активен" if row["is_active"] else "⏸ Выключен"
+    if row and (row.get("text") or row.get("media_file_id")):
+        status = "✅ Активен" if row.get("is_active", True) else "⏸ Выключен"
         info = (
             f"💧 *Шаг {step}*\n\n"
             f"Статус: {status}\n"
-            f"Задержка: `{row['delay_hours']}` ч\n"
-            f"Медиа: `{row['media_type'] or 'нет'}`\n\n"
-            f"Текст:\n{row['text'] or '_(нет)_'}"
+            f"Задержка: `{row.get('delay_hours', 24)}` ч\n"
+            f"Медиа: `{row.get('media_type') or 'нет'}`\n\n"
+            f"Текст:\n{row.get('text') or '_(нет)_'}"
         )
-        toggle_text = "⏸ Выключить" if row["is_active"] else "✅ Включить"
+        toggle_text = "⏸ Выключить" if row.get("is_active", True) else "✅ Включить"
         buttons = [
             [InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"drip_edit_{step}")],
             [InlineKeyboardButton(text=toggle_text, callback_data=f"drip_toggle_{step}")],
@@ -1051,7 +1086,6 @@ async def drip_back(query: types.CallbackQuery, state: FSMContext):
     if not is_admin(query.from_user.id):
         return
     await state.clear()
-    # пересоздаём меню drip
     class FakeMsg:
         chat = query.message.chat
         from_user = query.from_user
@@ -1066,17 +1100,14 @@ async def drip_preview(query: types.CallbackQuery, state: FSMContext):
     if not is_admin(query.from_user.id):
         return
     step = int(query.data.split("_")[-1])
-    async with AsyncSessionLocal() as session:
-        row = (await session.execute(
-            text("SELECT * FROM drip_messages WHERE step = :s"), {"s": step}
-        )).mappings().first()
+    row = await redis_get_drip_step(step)
 
-    if not row:
+    if not row or (not row.get("text") and not row.get("media_file_id")):
         await query.answer("Шаг не настроен", show_alert=True)
         return
 
     kb = None
-    if (row["button_text"] or "").strip() and (row["button_url"] or "").strip():
+    if (row.get("button_text") or "").strip() and (row.get("button_url") or "").strip():
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=row["button_text"], url=row["button_url"])
         ]])
@@ -1097,9 +1128,9 @@ async def drip_preview(query: types.CallbackQuery, state: FSMContext):
             pass
 
     try:
-        mtype = (row["media_type"] or "none").lower()
-        mid = row["media_file_id"]
-        txt = row["text"] or None
+        mtype = (row.get("media_type") or "none").lower()
+        mid = row.get("media_file_id")
+        txt = row.get("text") or None
         if mtype == "photo" and mid:
             preview_msg = await query.message.answer_photo(photo=mid, caption=txt, reply_markup=kb, caption_entities=cap_ent)
         elif mtype == "video" and mid:
@@ -1120,17 +1151,10 @@ async def drip_toggle(query: types.CallbackQuery, state: FSMContext):
     if not is_admin(query.from_user.id):
         return
     step = int(query.data.split("_")[-1])
-    async with AsyncSessionLocal() as session:
-        row = (await session.execute(
-            text("SELECT is_active FROM drip_messages WHERE step = :s"), {"s": step}
-        )).mappings().first()
-        if row:
-            new_val = not row["is_active"]
-            await session.execute(
-                text("UPDATE drip_messages SET is_active = :v WHERE step = :s"),
-                {"v": new_val, "s": step}
-            )
-            await session.commit()
+    row = await redis_get_drip_step(step)
+    if row:
+        row["is_active"] = not row.get("is_active", True)
+        await redis_set_drip_step(step, row)
     await query.answer("✅ Статус изменён")
     await drip_view_step(query, state)
 
@@ -1267,37 +1291,22 @@ async def drip_got_delay(message: types.Message, state: FSMContext):
     new_media_type = data.get("drip_new_media_type", "none")
     new_btn_text = data.get("drip_new_btn_text")
     new_btn_url = data.get("drip_new_btn_url")
-    logging.info(f"drip_got_delay: step={step}, entities_len={len(new_entities) if new_entities else 0}, entities={new_entities[:100] if new_entities else None}")
     await state.clear()
 
-    # Используем raw asyncpg соединение чтобы обойти проблему с transaction pooler
-    import asyncpg as _asyncpg
-    import os as _os
-    _db_url = _os.getenv("DATABASE_URL", "").replace("postgresql+asyncpg://", "postgresql://")
-    try:
-        _conn = await _asyncpg.connect(_db_url)
-        try:
-            await _conn.execute("""
-                INSERT INTO drip_messages (step, text, media_file_id, media_type, button_text, button_url, delay_hours, is_active, entities)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8)
-                ON CONFLICT (step) DO UPDATE SET
-                    text = EXCLUDED.text,
-                    media_file_id = EXCLUDED.media_file_id,
-                    media_type = EXCLUDED.media_type,
-                    button_text = EXCLUDED.button_text,
-                    button_url = EXCLUDED.button_url,
-                    delay_hours = EXCLUDED.delay_hours,
-                    is_active = true,
-                    entities = EXCLUDED.entities
-            """, step, new_text, new_media, new_media_type or "none",
-                new_btn_text, new_btn_url, delay, new_entities)
-            logging.info(f"drip step {step} saved OK via raw asyncpg, entities_len={len(new_entities) if new_entities else 0}")
-        finally:
-            await _conn.close()
-    except Exception:
-        logging.error(f"drip step {step} INSERT failed", exc_info=True)
-        await message.answer("❌ Ошибка сохранения шага. Смотри логи Render.")
-        return
+    # Сохраняем в Redis
+    existing = await redis_get_drip_step(step) or {}
+    drip_data = {
+        "text": new_text,
+        "entities": new_entities,
+        "media_file_id": new_media,
+        "media_type": new_media_type or "none",
+        "button_text": new_btn_text,
+        "button_url": new_btn_url,
+        "delay_hours": delay,
+        "is_active": existing.get("is_active", True),
+    }
+    await redis_set_drip_step(step, drip_data)
+    logging.info(f"drip step {step} saved to Redis OK, entities_len={len(new_entities) if new_entities else 0}")
 
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
@@ -1359,38 +1368,40 @@ async def handle_join_request(event: ChatJoinRequest):
         settings = await fetch_settings_map(session)
         welcome = settings.get("welcome_text") or ""
         markup = build_welcome_inline_keyboard(settings)
+        await session.commit()
 
-        dm = (await session.execute(
-            select(DripMessage).where(DripMessage.step == 0, DripMessage.is_active.is_(True))
-        )).scalar_one_or_none()
+    # Читаем step 0 из Redis
+    dm = await redis_get_drip_step(0)
+    dm_active = dm and dm.get("is_active", True) and (dm.get("text") or dm.get("media_file_id"))
 
-        if dm:
-            next_at = now_naive + timedelta(hours=dm.delay_hours or 24)
+    if dm_active:
+        async with AsyncSessionLocal() as session:
+            next_at = now_naive + timedelta(hours=dm.get("delay_hours") or 24)
             await session.merge(DripProgress(
                 user_id=event.from_user.id,
                 current_step=1,
                 next_send_at=next_at,
                 is_active=True,
             ))
-        await session.commit()
+            await session.commit()
 
     try:
         await bot.send_message(event.from_user.id, welcome, reply_markup=markup)
         # Отправляем step 0 сразу
-        if dm:
+        if dm_active:
             kb = None
-            if (dm.button_text or "").strip() and (dm.button_url or "").strip():
+            if (dm.get("button_text") or "").strip() and (dm.get("button_url") or "").strip():
                 kb = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text=dm.button_text, url=dm.button_url)
+                    InlineKeyboardButton(text=dm["button_text"], url=dm["button_url"])
                 ]])
-            text_body = dm.text or ""
-            mtype = (dm.media_type or "none").lower()
-            mid = dm.media_file_id
+            text_body = dm.get("text") or ""
+            mtype = (dm.get("media_type") or "none").lower()
+            mid = dm.get("media_file_id")
             _cap_ent = None
             _msg_ent = None
-            if getattr(dm, 'entities', None):
+            if dm.get("entities"):
                 try:
-                    _raw = json.loads(dm.entities)
+                    _raw = json.loads(dm["entities"])
                     _parsed = [MessageEntity(**e) for e in _raw] if _raw else None
                     if _parsed:
                         if mid:
@@ -1551,32 +1562,28 @@ async def drip_worker(stop: asyncio.Event):
                             continue
 
                         step = prog.current_step
-                        dm = (await session.execute(
-                            select(DripMessage).where(
-                                DripMessage.step == step,
-                                DripMessage.is_active.is_(True),
-                            )
-                        )).scalar_one_or_none()
-                        if not dm:
+                        # Читаем шаг из Redis
+                        dm = await redis_get_drip_step(step)
+                        if not dm or not dm.get("is_active", True) or (not dm.get("text") and not dm.get("media_file_id")):
                             prog.is_active = False
                             await session.commit()
                             continue
 
                         kb = None
-                        if (dm.button_text or "").strip() and (dm.button_url or "").strip():
+                        if (dm.get("button_text") or "").strip() and (dm.get("button_url") or "").strip():
                             kb = InlineKeyboardMarkup(inline_keyboard=[[
-                                InlineKeyboardButton(text=dm.button_text, url=dm.button_url)
+                                InlineKeyboardButton(text=dm["button_text"], url=dm["button_url"])
                             ]])
-                        text_body = dm.text or ""
-                        mtype = (dm.media_type or "none").lower()
-                        mid = dm.media_file_id
+                        text_body = dm.get("text") or ""
+                        mtype = (dm.get("media_type") or "none").lower()
+                        mid = dm.get("media_file_id")
 
                         # Десериализуем entities для кастомных эмодзи
                         msg_entities = None
                         cap_entities = None
-                        if getattr(dm, 'entities', None):
+                        if dm.get("entities"):
                             try:
-                                raw = json.loads(dm.entities)
+                                raw = json.loads(dm["entities"])
                                 parsed = [MessageEntity(**e) for e in raw] if raw else None
                                 if parsed:
                                     if mid:
@@ -1608,17 +1615,13 @@ async def drip_worker(stop: asyncio.Event):
                             prog.is_active = False
                             prog.next_send_at = None
                         else:
-                            nxt = (await session.execute(
-                                select(DripMessage).where(
-                                    DripMessage.step == prog.current_step,
-                                    DripMessage.is_active.is_(True),
-                                )
-                            )).scalar_one_or_none()
-                            if not nxt:
+                            # Читаем следующий шаг из Redis
+                            nxt = await redis_get_drip_step(prog.current_step)
+                            if not nxt or not nxt.get("is_active", True):
                                 prog.is_active = False
                                 prog.next_send_at = None
                             else:
-                                prog.next_send_at = now + timedelta(hours=nxt.delay_hours or 24)
+                                prog.next_send_at = now + timedelta(hours=nxt.get("delay_hours") or 24)
                         await session.commit()
                     finally:
                         await advisory_unlock_key(session, lock_key)
