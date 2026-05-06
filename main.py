@@ -1139,6 +1139,8 @@ async def drip_edit_start(query: types.CallbackQuery, state: FSMContext):
 async def drip_got_text(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
+    # ВРЕМЕННО: логируем что приходит
+    logging.info(f"drip_got_text: text={repr(message.text)}, entities={message.entities}")
     try:
         await message.delete()
     except Exception:
