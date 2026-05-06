@@ -382,7 +382,7 @@ async def admin_skip(m: types.Message, state: FSMContext):
         await state.set_state(DripStates.editing_media)
         await delete_prev_msgs(m.chat.id)
         msg = await m.answer(
-            "🖼️ Отправьте медиа (фото/видео/аудио) или нажмите *Пропустить*:",
+            "🖼️ Отправьте медиа или нажмите *Пропустить*:",
             parse_mode="Markdown",
             reply_markup=get_skip_cancel_kb(),
         )
@@ -1141,10 +1141,16 @@ async def drip_got_text(message: types.Message, state: FSMContext):
     except Exception:
         pass
     import json as _json
-    raw_entities = None
+    _raw_ent = None
     if message.entities:
-        raw_entities = _json.dumps([e.model_dump(exclude_none=True) for e in message.entities])
-    await state.update_data(drip_new_text=message.text, drip_new_entities=raw_entities)
+        try:
+            _raw_ent = _json.dumps([e.model_dump(exclude_none=True) for e in message.entities])
+        except Exception:
+            try:
+                _raw_ent = _json.dumps([e.dict(exclude_none=True) for e in message.entities])
+            except Exception:
+                _raw_ent = None
+    await state.update_data(drip_new_text=message.text, drip_new_entities=_raw_ent)
     await state.set_state(DripStates.editing_media)
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
@@ -1496,29 +1502,24 @@ async def drip_worker(stop: asyncio.Event):
 
                         import json as _json
                         from aiogram.types import MessageEntity as _ME
-                        _msg_entities = None
-                        _cap_entities = None
+                        _msg_ent = None
+                        _cap_ent = None
                         if getattr(dm, 'entities', None):
                             try:
-                                _raw = _json.loads(dm.entities)
-                                _parsed = [_ME(**e) for e in _raw] if _raw else None
+                                _parsed = [_ME(**e) for e in _json.loads(dm.entities)]
                                 if _parsed:
-                                    if mid:
-                                        _cap_entities = _parsed
-                                    else:
-                                        _msg_entities = _parsed
+                                    (_cap_ent if mid else _msg_ent); _msg_ent = None if mid else _parsed; _cap_ent = _parsed if mid else None
                             except Exception:
                                 pass
-
                         try:
                             if mtype == "video" and mid:
-                                await telegram_with_flood_retry(lambda: bot.send_video(uid, video=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_entities))
+                                await telegram_with_flood_retry(lambda: bot.send_video(uid, video=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_ent))
                             elif mtype == "photo" and mid:
-                                await telegram_with_flood_retry(lambda: bot.send_photo(uid, photo=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_entities))
+                                await telegram_with_flood_retry(lambda: bot.send_photo(uid, photo=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_ent))
                             elif mtype == "voice" and mid:
-                                await telegram_with_flood_retry(lambda: bot.send_voice(uid, voice=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_entities))
+                                await telegram_with_flood_retry(lambda: bot.send_voice(uid, voice=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_ent))
                             else:
-                                await telegram_with_flood_retry(lambda: bot.send_message(uid, text_body, reply_markup=kb, entities=_msg_entities))
+                                await telegram_with_flood_retry(lambda: bot.send_message(uid, text_body, reply_markup=kb, entities=_msg_ent))
                         except TelegramForbiddenError:
                             urow = await session.get(User, uid)
                             if urow:
