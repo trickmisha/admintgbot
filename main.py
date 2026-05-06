@@ -1270,32 +1270,34 @@ async def drip_got_delay(message: types.Message, state: FSMContext):
     logging.info(f"drip_got_delay: step={step}, entities_len={len(new_entities) if new_entities else 0}, entities={new_entities[:100] if new_entities else None}")
     await state.clear()
 
-    async with AsyncSessionLocal() as session:
+    # Используем raw asyncpg соединение чтобы обойти проблему с transaction pooler
+    import asyncpg as _asyncpg
+    import os as _os
+    _db_url = _os.getenv("DATABASE_URL", "").replace("postgresql+asyncpg://", "postgresql://")
+    try:
+        _conn = await _asyncpg.connect(_db_url)
         try:
-            await session.execute(
-                text("""
-                    INSERT INTO drip_messages (step, text, media_file_id, media_type, button_text, button_url, delay_hours, is_active, entities)
-                    VALUES (:s, :t, :m, :mt, :bt, :bu, :dh, true, :ent)
-                    ON CONFLICT (step) DO UPDATE SET
-                        text = EXCLUDED.text,
-                        media_file_id = EXCLUDED.media_file_id,
-                        media_type = EXCLUDED.media_type,
-                        button_text = EXCLUDED.button_text,
-                        button_url = EXCLUDED.button_url,
-                        delay_hours = EXCLUDED.delay_hours,
-                        is_active = true,
-                        entities = EXCLUDED.entities
-                """),
-                {"s": step, "t": new_text, "m": new_media, "mt": new_media_type or "none",
-                 "bt": new_btn_text, "bu": new_btn_url, "dh": delay, "ent": new_entities},
-            )
-            await session.commit()
-            logging.info(f"drip step {step} saved OK, entities_len={len(new_entities) if new_entities else 0}")
-        except Exception:
-            logging.error(f"drip step {step} INSERT failed", exc_info=True)
-            await session.rollback()
-            await message.answer("❌ Ошибка сохранения шага. Смотри логи Render.")
-            return
+            await _conn.execute("""
+                INSERT INTO drip_messages (step, text, media_file_id, media_type, button_text, button_url, delay_hours, is_active, entities)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8)
+                ON CONFLICT (step) DO UPDATE SET
+                    text = EXCLUDED.text,
+                    media_file_id = EXCLUDED.media_file_id,
+                    media_type = EXCLUDED.media_type,
+                    button_text = EXCLUDED.button_text,
+                    button_url = EXCLUDED.button_url,
+                    delay_hours = EXCLUDED.delay_hours,
+                    is_active = true,
+                    entities = EXCLUDED.entities
+            """, step, new_text, new_media, new_media_type or "none",
+                new_btn_text, new_btn_url, delay, new_entities)
+            logging.info(f"drip step {step} saved OK via raw asyncpg, entities_len={len(new_entities) if new_entities else 0}")
+        finally:
+            await _conn.close()
+    except Exception:
+        logging.error(f"drip step {step} INSERT failed", exc_info=True)
+        await message.answer("❌ Ошибка сохранения шага. Смотри логи Render.")
+        return
 
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
