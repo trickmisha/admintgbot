@@ -25,6 +25,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+from aiogram.types import MessageEntity
+
+import json
 
 from sqlalchemy import Column, BigInteger, String, Boolean, Integer, DateTime, ForeignKey, text, select, UniqueConstraint
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
@@ -51,14 +54,14 @@ PORT = int(_require_env("PORT"))
 
 REDIS_URL = os.getenv("REDIS_URL")
 
-# Часовой пояс админа. Томск = UTC+7.
-# Чтобы сменить: в Render → Environment Variables добавь TIMEZONE_OFFSET=7
+# Р§Р°СЃРѕРІРѕР№ РїРѕСЏСЃ Р°РґРјРёРЅР°. РўРѕРјСЃРє = UTC+7.
+# Р§С‚РѕР±С‹ СЃРјРµРЅРёС‚СЊ: РІ Render в†’ Environment Variables РґРѕР±Р°РІСЊ TIMEZONE_OFFSET=7
 TIMEZONE_OFFSET = int(os.getenv("TIMEZONE_OFFSET", "7"))
 
-# --- Мульти-админ ---
-# Чтобы добавить второго админа: в Render → Environment Variables
-# добавь ADMIN_IDS=123456789,987654321 (через запятую, без пробелов)
-# Если ADMIN_IDS не задан — используется только ADMIN_ID
+# --- РњСѓР»СЊС‚Рё-Р°РґРјРёРЅ ---
+# Р§С‚РѕР±С‹ РґРѕР±Р°РІРёС‚СЊ РІС‚РѕСЂРѕРіРѕ Р°РґРјРёРЅР°: РІ Render в†’ Environment Variables
+# РґРѕР±Р°РІСЊ ADMIN_IDS=123456789,987654321 (С‡РµСЂРµР· Р·Р°РїСЏС‚СѓСЋ, Р±РµР· РїСЂРѕР±РµР»РѕРІ)
+# Р•СЃР»Рё ADMIN_IDS РЅРµ Р·Р°РґР°РЅ вЂ” РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ С‚РѕР»СЊРєРѕ ADMIN_ID
 _admin_ids_raw = os.getenv("ADMIN_IDS", "")
 if _admin_ids_raw.strip():
     ADMIN_IDS: frozenset[int] = frozenset(
@@ -76,7 +79,7 @@ def is_admin(user_id: int) -> bool:
 T = TypeVar("T")
 _redis_client = None
 
-# Хранилище message_id последних сообщений бота для каждого админа
+# РҐСЂР°РЅРёР»РёС‰Рµ message_id РїРѕСЃР»РµРґРЅРёС… СЃРѕРѕР±С‰РµРЅРёР№ Р±РѕС‚Р° РґР»СЏ РєР°Р¶РґРѕРіРѕ Р°РґРјРёРЅР°
 # { user_id: [msg_id1, msg_id2, ...] }
 _admin_last_msgs: dict[int, list[int]] = {}
 
@@ -143,7 +146,7 @@ class DripMessage(Base):
     button_url = Column(String)
     delay_hours = Column(Integer, default=24)
     is_active = Column(Boolean, default=True)
-    entities = Column(String)
+    entities = Column(String)  # JSON-СЃРµСЂРёР°Р»РёР·РѕРІР°РЅРЅС‹Рµ MessageEntity РґР»СЏ РєР°СЃС‚РѕРјРЅС‹С… СЌРјРѕРґР·Рё
 
 
 class DripProgress(Base):
@@ -204,7 +207,6 @@ class PostStates(StatesGroup):
 
 
 class DripStates(StatesGroup):
-    viewing = State()
     editing_text = State()
     editing_media = State()
     editing_button_text = State()
@@ -266,10 +268,10 @@ async def seed_default_settings(session: AsyncSession) -> None:
     inner = s[4:] if s.startswith("-100") else str(abs(cid))
     free_link = f"https://t.me/c/{inner}"
     defaults = [
-        ("welcome_text", "Missed me? 🫦 I've been thinking about u all day."),
-        ("button1_text", "🫦 Enter the Sanctuary"),
+        ("welcome_text", "Missed me? рџ«¦ I've been thinking about u all day."),
+        ("button1_text", "рџ«¦ Enter the Sanctuary"),
         ("button1_url", free_link),
-        ("button2_text", "⭐ VIP (Stars)"),
+        ("button2_text", "в­ђ VIP (Stars)"),
         ("button2_url", ""),
         ("paid_channel_link", PAID_CHANNEL_LINK),
     ]
@@ -283,21 +285,21 @@ async def seed_default_settings(session: AsyncSession) -> None:
 
 def get_admin_keyboard() -> ReplyKeyboardMarkup:
     kb = [
-        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="📢 Рассылка")],
-        [KeyboardButton(text="📝 Посты"), KeyboardButton(text="💧 Drip")],
+        [KeyboardButton(text="рџ“Љ РЎС‚Р°С‚РёСЃС‚РёРєР°"), KeyboardButton(text="рџ“ў Р Р°СЃСЃС‹Р»РєР°")],
+        [KeyboardButton(text="рџ“ќ РџРѕСЃС‚С‹"), KeyboardButton(text="рџ’§ Drip")],
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 
 def get_cancel_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="❌ Отмена")]], resize_keyboard=True
+        keyboard=[[KeyboardButton(text="вќЊ РћС‚РјРµРЅР°")]], resize_keyboard=True
     )
 
 
 def get_skip_cancel_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="⏭ Пропустить"), KeyboardButton(text="❌ Отмена")]],
+        keyboard=[[KeyboardButton(text="вЏ­ РџСЂРѕРїСѓСЃС‚РёС‚СЊ"), KeyboardButton(text="вќЊ РћС‚РјРµРЅР°")]],
         resize_keyboard=True,
     )
 
@@ -305,7 +307,7 @@ def get_skip_cancel_kb() -> ReplyKeyboardMarkup:
 def _audience_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[
-            InlineKeyboardButton(text="Все", callback_data="aud_all"),
+            InlineKeyboardButton(text="Р’СЃРµ", callback_data="aud_all"),
             InlineKeyboardButton(text="Free", callback_data="aud_free"),
             InlineKeyboardButton(text="VIP", callback_data="aud_vip"),
         ]]
@@ -313,11 +315,11 @@ def _audience_keyboard() -> InlineKeyboardMarkup:
 
 
 async def setup_bot_commands():
-    commands = [types.BotCommand(command="start", description="Main Menu 🫦")]
+    commands = [types.BotCommand(command="start", description="Main Menu рџ«¦")]
     await bot.set_my_commands(commands)
 
 
-# --- Удаление предыдущих сообщений бота ---
+# --- РЈРґР°Р»РµРЅРёРµ РїСЂРµРґС‹РґСѓС‰РёС… СЃРѕРѕР±С‰РµРЅРёР№ Р±РѕС‚Р° ---
 async def delete_prev_msgs(chat_id: int) -> None:
     msgs = _admin_last_msgs.pop(chat_id, [])
     for mid in msgs:
@@ -331,7 +333,7 @@ def remember_msg(chat_id: int, msg: types.Message) -> None:
     _admin_last_msgs.setdefault(chat_id, []).append(msg.message_id)
 
 
-# --- Авто-удаляемое уведомление ---
+# --- РђРІС‚Рѕ-СѓРґР°Р»СЏРµРјРѕРµ СѓРІРµРґРѕРјР»РµРЅРёРµ ---
 async def notify_and_delete(chat_id: int, text_msg: str, delay: int = 5) -> None:
     try:
         m = await bot.send_message(chat_id, text_msg)
@@ -345,7 +347,7 @@ async def notify_and_delete(chat_id: int, text_msg: str, delay: int = 5) -> None
 # HANDLERS
 # =====================
 
-@dp.message(F.text == "❌ Отмена")
+@dp.message(F.text == "вќЊ РћС‚РјРµРЅР°")
 async def admin_cancel(m: types.Message, state: FSMContext):
     if not is_admin(m.from_user.id):
         return
@@ -355,11 +357,11 @@ async def admin_cancel(m: types.Message, state: FSMContext):
         await m.delete()
     except Exception:
         pass
-    msg = await m.answer("Действие отменено.", reply_markup=get_admin_keyboard())
+    msg = await m.answer("Р”РµР№СЃС‚РІРёРµ РѕС‚РјРµРЅРµРЅРѕ.", reply_markup=get_admin_keyboard())
     remember_msg(m.chat.id, msg)
 
 
-@dp.message(F.text == "⏭ Пропустить")
+@dp.message(F.text == "вЏ­ РџСЂРѕРїСѓСЃС‚РёС‚СЊ")
 async def admin_skip(m: types.Message, state: FSMContext):
     if not is_admin(m.from_user.id):
         return
@@ -368,6 +370,7 @@ async def admin_skip(m: types.Message, state: FSMContext):
         await m.delete()
     except Exception:
         pass
+    # PostStates
     if current == PostStates.waiting_media:
         await state.update_data(media_id=None, media_type=None)
         await _ask_post_text(m, state)
@@ -377,27 +380,26 @@ async def admin_skip(m: types.Message, state: FSMContext):
     elif current == PostStates.waiting_button_text:
         await state.update_data(button_text=None, button_url=None)
         await _ask_post_time(m, state)
+    # DripStates
     elif current == DripStates.editing_text:
         await state.update_data(drip_new_text=None, drip_new_entities=None)
         await state.set_state(DripStates.editing_media)
         await delete_prev_msgs(m.chat.id)
         msg = await m.answer(
-            "🖼️ Отправьте медиа или нажмите *Пропустить*:",
-            parse_mode="Markdown",
-            reply_markup=get_skip_cancel_kb(),
+            "рџ–ј РћС‚РїСЂР°РІСЊС‚Рµ РјРµРґРёР° (С„РѕС‚Рѕ/РІРёРґРµРѕ/Р°СѓРґРёРѕ) РёР»Рё РЅР°Р¶РјРёС‚Рµ *РџСЂРѕРїСѓСЃС‚РёС‚СЊ*:",
+            parse_mode="Markdown", reply_markup=get_skip_cancel_kb(),
         )
         remember_msg(m.chat.id, msg)
     elif current == DripStates.editing_media:
-        await state.update_data(drip_new_media=None, drip_new_media_type="none")
+        await state.update_data(drip_new_media=None, drip_new_media_type=None)
         await _drip_ask_button(m, state)
     elif current == DripStates.editing_button_text:
         await state.update_data(drip_new_btn_text=None, drip_new_btn_url=None)
         await state.set_state(DripStates.editing_delay)
         await delete_prev_msgs(m.chat.id)
         msg = await m.answer(
-            "⏱ Через сколько часов отправить этот шаг?\nВведите число (например: `24`):",
-            parse_mode="Markdown",
-            reply_markup=get_cancel_kb(),
+            "вЏ± Р§РµСЂРµР· СЃРєРѕР»СЊРєРѕ С‡Р°СЃРѕРІ РѕС‚РїСЂР°РІРёС‚СЊ С€Р°Рі?\nР’РІРµРґРёС‚Рµ С‡РёСЃР»Рѕ (РЅР°РїСЂРёРјРµСЂ: `24`):",
+            parse_mode="Markdown", reply_markup=get_cancel_kb(),
         )
         remember_msg(m.chat.id, msg)
 
@@ -423,11 +425,11 @@ async def cmd_start(message: types.Message, state: FSMContext):
             await session.commit()
 
     if is_admin(message.from_user.id):
-        m1 = await message.answer("Добро пожаловать, Босс.", reply_markup=get_admin_keyboard())
+        m1 = await message.answer("Р”РѕР±СЂРѕ РїРѕР¶Р°Р»РѕРІР°С‚СЊ, Р‘РѕСЃСЃ.", reply_markup=get_admin_keyboard())
         m2 = await message.answer(
-            "Панель управления:",
+            "РџР°РЅРµР»СЊ СѓРїСЂР°РІР»РµРЅРёСЏ:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="🌐 Открыть панель", web_app=WebAppInfo(url=MINIAPP_URL))
+                InlineKeyboardButton(text="рџЊђ РћС‚РєСЂС‹С‚СЊ РїР°РЅРµР»СЊ", web_app=WebAppInfo(url=MINIAPP_URL))
             ]])
         )
         remember_msg(message.chat.id, m1)
@@ -441,8 +443,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer(welcome, reply_markup=markup)
 
 
-# --- Статистика ---
-@dp.message(F.text == "📊 Статистика")
+# --- РЎС‚Р°С‚РёСЃС‚РёРєР° ---
+@dp.message(F.text == "рџ“Љ РЎС‚Р°С‚РёСЃС‚РёРєР°")
 async def admin_stats(message: types.Message):
     if not is_admin(message.from_user.id):
         return
@@ -458,20 +460,20 @@ async def admin_stats(message: types.Message):
         conv = (vip / total * 100.0) if total else 0.0
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
-        f"📊 *Статистика*\n\n"
-        f"👥 Всего юзеров: `{total}`\n"
-        f"👑 VIP: `{vip}`\n"
-        f"💧 В drip: `{in_drip}`\n"
-        f"🚫 Заблокировали: `{blocked}`\n"
-        f"📈 Конверсия: `{conv:.1f}%`",
+        f"рџ“Љ *РЎС‚Р°С‚РёСЃС‚РёРєР°*\n\n"
+        f"рџ‘Ґ Р’СЃРµРіРѕ СЋР·РµСЂРѕРІ: `{total}`\n"
+        f"рџ‘‘ VIP: `{vip}`\n"
+        f"рџ’§ Р’ drip: `{in_drip}`\n"
+        f"рџљ« Р—Р°Р±Р»РѕРєРёСЂРѕРІР°Р»Рё: `{blocked}`\n"
+        f"рџ“€ РљРѕРЅРІРµСЂСЃРёСЏ: `{conv:.1f}%`",
         parse_mode="Markdown",
         reply_markup=get_admin_keyboard(),
     )
     remember_msg(message.chat.id, msg)
 
 
-# --- Рассылка ---
-@dp.message(F.text == "📢 Рассылка")
+# --- Р Р°СЃСЃС‹Р»РєР° ---
+@dp.message(F.text == "рџ“ў Р Р°СЃСЃС‹Р»РєР°")
 async def admin_broadcast_start(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
@@ -482,7 +484,7 @@ async def admin_broadcast_start(message: types.Message, state: FSMContext):
     await state.set_state(AdminStates.waiting_broadcast_message)
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
-        "📢 *Рассылка*\n\nПришлите сообщение для рассылки (текст, фото, видео).",
+        "рџ“ў *Р Р°СЃСЃС‹Р»РєР°*\n\nРџСЂРёС€Р»РёС‚Рµ СЃРѕРѕР±С‰РµРЅРёРµ РґР»СЏ СЂР°СЃСЃС‹Р»РєРё (С‚РµРєСЃС‚, С„РѕС‚Рѕ, РІРёРґРµРѕ).",
         parse_mode="Markdown",
         reply_markup=get_cancel_kb(),
     )
@@ -496,7 +498,7 @@ async def admin_broadcast_got_message(message: types.Message, state: FSMContext)
     await state.update_data(bc_chat_id=message.chat.id, bc_message_id=message.message_id)
     await state.set_state(AdminStates.waiting_broadcast_audience)
     await delete_prev_msgs(message.chat.id)
-    msg = await message.answer("Выберите аудиторию:", reply_markup=_audience_keyboard())
+    msg = await message.answer("Р’С‹Р±РµСЂРёС‚Рµ Р°СѓРґРёС‚РѕСЂРёСЋ:", reply_markup=_audience_keyboard())
     remember_msg(message.chat.id, msg)
 
 
@@ -524,7 +526,7 @@ async def admin_broadcast_run(query: types.CallbackQuery, state: FSMContext):
         user_ids = list(res.scalars().all())
 
     sent = 0
-    status_msg = await query.message.answer(f"🚀 Рассылка ({target}): {len(user_ids)} получателей…")
+    status_msg = await query.message.answer(f"рџљЂ Р Р°СЃСЃС‹Р»РєР° ({target}): {len(user_ids)} РїРѕР»СѓС‡Р°С‚РµР»РµР№вЂ¦")
     for uid in user_ids:
         try:
             await telegram_with_flood_retry(
@@ -539,7 +541,7 @@ async def admin_broadcast_run(query: types.CallbackQuery, state: FSMContext):
                     u.blocked = True
                     await session.commit()
         except Exception as e:
-            logging.error(f"Broadcast error for {uid}: {e}")
+            logging.error(f"Broadcast error for {uid}", exc_info=True)
 
     try:
         await bot.delete_message(query.message.chat.id, status_msg.message_id)
@@ -548,7 +550,7 @@ async def admin_broadcast_run(query: types.CallbackQuery, state: FSMContext):
 
     await delete_prev_msgs(query.message.chat.id)
     msg = await query.message.answer(
-        f"✅ *Рассылка завершена*\n\nДоставлено: `{sent}` из `{len(user_ids)}`",
+        f"вњ… *Р Р°СЃСЃС‹Р»РєР° Р·Р°РІРµСЂС€РµРЅР°*\n\nР”РѕСЃС‚Р°РІР»РµРЅРѕ: `{sent}` РёР· `{len(user_ids)}`",
         parse_mode="Markdown",
         reply_markup=get_admin_keyboard(),
     )
@@ -557,14 +559,14 @@ async def admin_broadcast_run(query: types.CallbackQuery, state: FSMContext):
 
 
 # =====================
-# ПОСТЫ — FSM
+# РџРћРЎРўР« вЂ” FSM
 # =====================
 
 async def _ask_post_text(message: types.Message, state: FSMContext):
     await state.set_state(PostStates.waiting_text)
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
-        "✏️ Введите текст поста или нажмите *Пропустить*:",
+        "вњЏпёЏ Р’РІРµРґРёС‚Рµ С‚РµРєСЃС‚ РїРѕСЃС‚Р° РёР»Рё РЅР°Р¶РјРёС‚Рµ *РџСЂРѕРїСѓСЃС‚РёС‚СЊ*:",
         parse_mode="Markdown",
         reply_markup=get_skip_cancel_kb(),
     )
@@ -575,7 +577,7 @@ async def _ask_post_button(message: types.Message, state: FSMContext):
     await state.set_state(PostStates.waiting_button_text)
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
-        "🔘 Введите текст кнопки или нажмите *Пропустить*:",
+        "рџ” Р’РІРµРґРёС‚Рµ С‚РµРєСЃС‚ РєРЅРѕРїРєРё РёР»Рё РЅР°Р¶РјРёС‚Рµ *РџСЂРѕРїСѓСЃС‚РёС‚СЊ*:",
         parse_mode="Markdown",
         reply_markup=get_skip_cancel_kb(),
     )
@@ -586,16 +588,16 @@ async def _ask_post_time(message: types.Message, state: FSMContext):
     await state.set_state(PostStates.choosing_time)
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
-        "🕐 Когда опубликовать?",
+        "рџ•ђ РљРѕРіРґР° РѕРїСѓР±Р»РёРєРѕРІР°С‚СЊ?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="⚡ Сейчас", callback_data="post_time_now"),
-            InlineKeyboardButton(text="📅 Запланировать", callback_data="post_time_later"),
+            InlineKeyboardButton(text="вљЎ РЎРµР№С‡Р°СЃ", callback_data="post_time_now"),
+            InlineKeyboardButton(text="рџ“… Р—Р°РїР»Р°РЅРёСЂРѕРІР°С‚СЊ", callback_data="post_time_later"),
         ]]),
     )
     remember_msg(message.chat.id, msg)
 
 
-@dp.message(F.text == "📝 Посты")
+@dp.message(F.text == "рџ“ќ РџРѕСЃС‚С‹")
 async def admin_posts_menu(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
@@ -606,11 +608,11 @@ async def admin_posts_menu(message: types.Message, state: FSMContext):
     await state.clear()
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
-        "📝 *Посты*\n\nВыберите действие:",
+        "рџ“ќ *РџРѕСЃС‚С‹*\n\nР’С‹Р±РµСЂРёС‚Рµ РґРµР№СЃС‚РІРёРµ:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Создать пост", callback_data="post_create")],
-            [InlineKeyboardButton(text="📋 Запланированные", callback_data="post_list")],
+            [InlineKeyboardButton(text="вћ• РЎРѕР·РґР°С‚СЊ РїРѕСЃС‚", callback_data="post_create")],
+            [InlineKeyboardButton(text="рџ“‹ Р—Р°РїР»Р°РЅРёСЂРѕРІР°РЅРЅС‹Рµ", callback_data="post_list")],
         ]),
     )
     remember_msg(message.chat.id, msg)
@@ -625,10 +627,10 @@ async def post_create_start(query: types.CallbackQuery, state: FSMContext):
                              button_text=None, button_url=None)
     await delete_prev_msgs(query.message.chat.id)
     msg = await query.message.answer(
-        "📡 Выберите канал для публикации:",
+        "рџ“Ў Р’С‹Р±РµСЂРёС‚Рµ РєР°РЅР°Р» РґР»СЏ РїСѓР±Р»РёРєР°С†РёРё:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🆓 Free", callback_data="post_ch_free"),
-            InlineKeyboardButton(text="👑 Paid", callback_data="post_ch_paid"),
+            InlineKeyboardButton(text="рџ†“ Free", callback_data="post_ch_free"),
+            InlineKeyboardButton(text="рџ‘‘ Paid", callback_data="post_ch_paid"),
         ]]),
     )
     remember_msg(query.message.chat.id, msg)
@@ -644,9 +646,9 @@ async def post_choose_channel(query: types.CallbackQuery, state: FSMContext):
     await state.set_state(PostStates.waiting_media)
     await delete_prev_msgs(query.message.chat.id)
     msg = await query.message.answer(
-        f"📡 Канал: *{'Free' if channel == 'free' else 'Paid'}*\n\n"
-        "🖼 Отправьте фото, видео или аудио (будет как голосовое).\n"
-        "Или нажмите *Пропустить* если пост без медиа.",
+        f"рџ“Ў РљР°РЅР°Р»: *{'Free' if channel == 'free' else 'Paid'}*\n\n"
+        "рџ–ј РћС‚РїСЂР°РІСЊС‚Рµ С„РѕС‚Рѕ, РІРёРґРµРѕ РёР»Рё Р°СѓРґРёРѕ (Р±СѓРґРµС‚ РєР°Рє РіРѕР»РѕСЃРѕРІРѕРµ).\n"
+        "РР»Рё РЅР°Р¶РјРёС‚Рµ *РџСЂРѕРїСѓСЃС‚РёС‚СЊ* РµСЃР»Рё РїРѕСЃС‚ Р±РµР· РјРµРґРёР°.",
         parse_mode="Markdown",
         reply_markup=get_skip_cancel_kb(),
     )
@@ -673,7 +675,7 @@ async def post_got_media(message: types.Message, state: FSMContext):
         media_type = "voice"
     elif message.audio:
         media_id = message.audio.file_id
-        media_type = "voice"  # публикуем аудио как голосовое
+        media_type = "voice"  # РїСѓР±Р»РёРєСѓРµРј Р°СѓРґРёРѕ РєР°Рє РіРѕР»РѕСЃРѕРІРѕРµ
     else:
         media_id = None
         media_type = None
@@ -683,7 +685,7 @@ async def post_got_media(message: types.Message, state: FSMContext):
 
 @dp.message(PostStates.waiting_media, F.document)
 async def post_got_media_document(message: types.Message, state: FSMContext):
-    """Ловим OGG/аудио отправленные как документ"""
+    """Р›РѕРІРёРј OGG/Р°СѓРґРёРѕ РѕС‚РїСЂР°РІР»РµРЅРЅС‹Рµ РєР°Рє РґРѕРєСѓРјРµРЅС‚"""
     if not is_admin(message.from_user.id):
         return
     try:
@@ -697,7 +699,7 @@ async def post_got_media_document(message: types.Message, state: FSMContext):
         media_id = doc.file_id
         media_type = "voice"
     else:
-        msg = await message.answer("⚠️ Неподдерживаемый тип. Отправьте фото, видео или OGG аудио.")
+        msg = await message.answer("вљ пёЏ РќРµРїРѕРґРґРµСЂР¶РёРІР°РµРјС‹Р№ С‚РёРї. РћС‚РїСЂР°РІСЊС‚Рµ С„РѕС‚Рѕ, РІРёРґРµРѕ РёР»Рё OGG Р°СѓРґРёРѕ.")
         remember_msg(message.chat.id, msg)
         return
     await state.update_data(media_id=media_id, media_type=media_type)
@@ -728,7 +730,7 @@ async def post_got_button_text(message: types.Message, state: FSMContext):
     await state.set_state(PostStates.waiting_button_url)
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
-        "🔗 Введите URL для кнопки:",
+        "рџ”— Р’РІРµРґРёС‚Рµ URL РґР»СЏ РєРЅРѕРїРєРё:",
         reply_markup=get_cancel_kb(),
     )
     remember_msg(message.chat.id, msg)
@@ -757,7 +759,7 @@ async def post_choose_time(query: types.CallbackQuery, state: FSMContext):
         await state.set_state(PostStates.waiting_custom_time)
         await delete_prev_msgs(query.message.chat.id)
         msg = await query.message.answer(
-            "📅 Введите дату и время публикации в формате:\n`ДД.ММ.ГГГГ ЧЧ:ММ`\n\nНапример: `25.12.2025 15:00`",
+            "рџ“… Р’РІРµРґРёС‚Рµ РґР°С‚Сѓ Рё РІСЂРµРјСЏ РїСѓР±Р»РёРєР°С†РёРё РІ С„РѕСЂРјР°С‚Рµ:\n`Р”Р”.РњРњ.Р“Р“Р“Р“ Р§Р§:РњРњ`\n\nРќР°РїСЂРёРјРµСЂ: `25.12.2025 15:00`",
             parse_mode="Markdown",
             reply_markup=get_cancel_kb(),
         )
@@ -775,16 +777,16 @@ async def post_got_custom_time(message: types.Message, state: FSMContext):
         pass
     try:
         dt = datetime.strptime(message.text.strip(), "%d.%m.%Y %H:%M")
-        # Конвертируем из локального времени (Томск UTC+7) в UTC
+        # РљРѕРЅРІРµСЂС‚РёСЂСѓРµРј РёР· Р»РѕРєР°Р»СЊРЅРѕРіРѕ РІСЂРµРјРµРЅРё (РўРѕРјСЃРє UTC+7) РІ UTC
         dt_utc = dt - timedelta(hours=TIMEZONE_OFFSET)
     except ValueError:
         msg = await message.answer(
-            "❌ Неверный формат. Попробуйте ещё раз:\n`ДД.ММ.ГГГГ ЧЧ:ММ`\n\nВремя по-томски (UTC+7)",
+            "вќЊ РќРµРІРµСЂРЅС‹Р№ С„РѕСЂРјР°С‚. РџРѕРїСЂРѕР±СѓР№С‚Рµ РµС‰С‘ СЂР°Р·:\n`Р”Р”.РњРњ.Р“Р“Р“Р“ Р§Р§:РњРњ`\n\nР’СЂРµРјСЏ РїРѕ-С‚РѕРјСЃРєРё (UTC+7)",
             parse_mode="Markdown",
         )
         remember_msg(message.chat.id, msg)
         return
-    # Сохраняем как строку — Redis не умеет сериализовать datetime напрямую
+    # РЎРѕС…СЂР°РЅСЏРµРј РєР°Рє СЃС‚СЂРѕРєСѓ вЂ” Redis РЅРµ СѓРјРµРµС‚ СЃРµСЂРёР°Р»РёР·РѕРІР°С‚СЊ datetime РЅР°РїСЂСЏРјСѓСЋ
     await state.update_data(publish_now=False, scheduled_at=dt_utc.isoformat())
     await _show_post_preview(message, state)
 
@@ -803,28 +805,28 @@ async def _show_post_preview(message: types.Message, state: FSMContext):
     publish_now = data.get("publish_now", True)
     scheduled_at_raw = data.get("scheduled_at")
     scheduled_at = datetime.fromisoformat(scheduled_at_raw) if scheduled_at_raw else None
-    # Переводим в локальное время для отображения
+    # РџРµСЂРµРІРѕРґРёРј РІ Р»РѕРєР°Р»СЊРЅРѕРµ РІСЂРµРјСЏ РґР»СЏ РѕС‚РѕР±СЂР°Р¶РµРЅРёСЏ
     scheduled_at_local = (scheduled_at + timedelta(hours=TIMEZONE_OFFSET)) if scheduled_at else None
 
-    # Строим клавиатуру превью
+    # РЎС‚СЂРѕРёРј РєР»Р°РІРёР°С‚СѓСЂСѓ РїСЂРµРІСЊСЋ
     preview_kb = None
     if button_text and button_url:
         preview_kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=button_text, url=button_url)
         ]])
 
-    # Показываем превью
-    time_str = "сейчас" if publish_now else (scheduled_at_local.strftime("%d.%m.%Y %H:%M") + " (Томск)" if scheduled_at_local else "—")
+    # РџРѕРєР°Р·С‹РІР°РµРј РїСЂРµРІСЊСЋ
+    time_str = "СЃРµР№С‡Р°СЃ" if publish_now else (scheduled_at_local.strftime("%d.%m.%Y %H:%M") + " (РўРѕРјСЃРє)" if scheduled_at_local else "вЂ”")
     info = (
-        f"👁 *Превью поста*\n\n"
-        f"📡 Канал: *{'Free' if channel == 'free' else 'Paid'}*\n"
-        f"⏰ {'Публикация: ' + time_str}\n\n"
-        f"Так будет выглядеть пост:"
+        f"рџ‘Ѓ *РџСЂРµРІСЊСЋ РїРѕСЃС‚Р°*\n\n"
+        f"рџ“Ў РљР°РЅР°Р»: *{'Free' if channel == 'free' else 'Paid'}*\n"
+        f"вЏ° {'РџСѓР±Р»РёРєР°С†РёСЏ: ' + time_str}\n\n"
+        f"РўР°Рє Р±СѓРґРµС‚ РІС‹РіР»СЏРґРµС‚СЊ РїРѕСЃС‚:"
     )
     msg_info = await message.answer(info, parse_mode="Markdown")
     remember_msg(message.chat.id, msg_info)
 
-    # Отправляем само превью
+    # РћС‚РїСЂР°РІР»СЏРµРј СЃР°РјРѕ РїСЂРµРІСЊСЋ
     try:
         if media_type == "photo" and media_id:
             preview_msg = await message.answer_photo(photo=media_id, caption=post_text or None, reply_markup=preview_kb)
@@ -835,18 +837,18 @@ async def _show_post_preview(message: types.Message, state: FSMContext):
         elif post_text:
             preview_msg = await message.answer(post_text, reply_markup=preview_kb)
         else:
-            preview_msg = await message.answer("_(пустой пост)_", parse_mode="Markdown")
+            preview_msg = await message.answer("_(РїСѓСЃС‚РѕР№ РїРѕСЃС‚)_", parse_mode="Markdown")
         remember_msg(message.chat.id, preview_msg)
     except Exception as e:
-        err_msg = await message.answer(f"⚠️ Не удалось показать превью: {e}")
+        err_msg = await message.answer(f"вљ пёЏ РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕРєР°Р·Р°С‚СЊ РїСЂРµРІСЊСЋ: {e}")
         remember_msg(message.chat.id, err_msg)
 
-    # Кнопки подтверждения
+    # РљРЅРѕРїРєРё РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ
     confirm_msg = await message.answer(
-        "Подтвердите публикацию:",
+        "РџРѕРґС‚РІРµСЂРґРёС‚Рµ РїСѓР±Р»РёРєР°С†РёСЋ:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="✅ Опубликовать", callback_data="post_confirm"),
-            InlineKeyboardButton(text="❌ Отмена", callback_data="post_cancel"),
+            InlineKeyboardButton(text="вњ… РћРїСѓР±Р»РёРєРѕРІР°С‚СЊ", callback_data="post_confirm"),
+            InlineKeyboardButton(text="вќЊ РћС‚РјРµРЅР°", callback_data="post_cancel"),
         ]]),
     )
     remember_msg(message.chat.id, confirm_msg)
@@ -858,7 +860,7 @@ async def post_cancel_confirm(query: types.CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await delete_prev_msgs(query.message.chat.id)
-    msg = await query.message.answer("❌ Отменено.", reply_markup=get_admin_keyboard())
+    msg = await query.message.answer("вќЊ РћС‚РјРµРЅРµРЅРѕ.", reply_markup=get_admin_keyboard())
     remember_msg(query.message.chat.id, msg)
     await query.answer()
 
@@ -889,23 +891,24 @@ async def post_confirm(query: types.CallbackQuery, state: FSMContext):
             text(
                 "INSERT INTO content_queue "
                 "(text, media_id, price, post_type, channel, button_text, button_url, scheduled_at, status, media_type) "
-                "VALUES (:text, :mid, 0, 'free', :ch, :bt, :bu, :sa, 'pending', :mt)"
+                "VALUES (:text, :mid, 0, :pt, :ch, :bt, :bu, :sa, 'pending', :mt)"
             ),
             {"text": post_text, "mid": media_id, "ch": channel,
+             "pt": channel,  # post_type = channel (free/paid)
              "bt": button_text, "bu": button_url, "sa": sched, "mt": data.get("media_type")},
         )
         await session.commit()
 
     await delete_prev_msgs(query.message.chat.id)
     if publish_now:
-        result_text = "✅ *Пост добавлен в очередь на публикацию!*\nБудет опубликован в течение минуты."
+        result_text = "вњ… *РџРѕСЃС‚ РґРѕР±Р°РІР»РµРЅ РІ РѕС‡РµСЂРµРґСЊ РЅР° РїСѓР±Р»РёРєР°С†РёСЋ!*\nР‘СѓРґРµС‚ РѕРїСѓР±Р»РёРєРѕРІР°РЅ РІ С‚РµС‡РµРЅРёРµ РјРёРЅСѓС‚С‹."
     else:
-        dt_str = scheduled_at_local.strftime("%d.%m.%Y %H:%M") if scheduled_at_local else "—"
-        result_text = f"🕐 *Пост запланирован*\nДата: `{dt_str}` (Томск)"
+        dt_str = scheduled_at_local.strftime("%d.%m.%Y %H:%M") if scheduled_at_local else "вЂ”"
+        result_text = f"рџ•ђ *РџРѕСЃС‚ Р·Р°РїР»Р°РЅРёСЂРѕРІР°РЅ*\nР”Р°С‚Р°: `{dt_str}` (РўРѕРјСЃРє)"
 
     msg = await query.message.answer(result_text, parse_mode="Markdown", reply_markup=get_admin_keyboard())
     remember_msg(query.message.chat.id, msg)
-    await query.answer("✅ Готово!")
+    await query.answer("вњ… Р“РѕС‚РѕРІРѕ!")
 
 
 @dp.callback_query(F.data == "post_list")
@@ -919,20 +922,20 @@ async def post_list(query: types.CallbackQuery, state: FSMContext):
 
     if not rows:
         await delete_prev_msgs(query.message.chat.id)
-        msg = await query.message.answer("📋 Нет запланированных постов.", reply_markup=get_admin_keyboard())
+        msg = await query.message.answer("рџ“‹ РќРµС‚ Р·Р°РїР»Р°РЅРёСЂРѕРІР°РЅРЅС‹С… РїРѕСЃС‚РѕРІ.", reply_markup=get_admin_keyboard())
         remember_msg(query.message.chat.id, msg)
         await query.answer()
         return
 
-    text_lines = ["📋 *Запланированные посты:*\n"]
+    text_lines = ["рџ“‹ *Р—Р°РїР»Р°РЅРёСЂРѕРІР°РЅРЅС‹Рµ РїРѕСЃС‚С‹:*\n"]
     buttons = []
     for r in rows:
         dt = r["scheduled_at"]
-        dt_str = dt.strftime("%d.%m %H:%M") if dt else "сейчас"
-        preview = (r["text"] or "")[:30] or "(медиа)"
-        text_lines.append(f"• `{dt_str}` [{r['channel']}] {preview}")
+        dt_str = dt.strftime("%d.%m %H:%M") if dt else "СЃРµР№С‡Р°СЃ"
+        preview = (r["text"] or "")[:30] or "(РјРµРґРёР°)"
+        text_lines.append(f"вЂў `{dt_str}` [{r['channel']}] {preview}")
         buttons.append([InlineKeyboardButton(
-            text=f"🗑 #{r['id']} {dt_str}",
+            text=f"рџ—‘ #{r['id']} {dt_str}",
             callback_data=f"post_del_{r['id']}"
         )])
 
@@ -954,15 +957,15 @@ async def post_delete(query: types.CallbackQuery, state: FSMContext):
     async with AsyncSessionLocal() as session:
         await session.execute(text("DELETE FROM content_queue WHERE id = :id"), {"id": post_id})
         await session.commit()
-    await query.answer("🗑 Удалено")
+    await query.answer("рџ—‘ РЈРґР°Р»РµРЅРѕ")
     await post_list(query, state)
 
 
 # =====================
-# DRIP — FSM
+# DRIP вЂ” FSM
 # =====================
 
-@dp.message(F.text == "💧 Drip")
+@dp.message(F.text == "рџ’§ Drip")
 async def admin_drip_menu(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
@@ -981,16 +984,16 @@ async def admin_drip_menu(message: types.Message, state: FSMContext):
     for s in range(5):
         r = by_step.get(s)
         if r:
-            status = "✅" if r["is_active"] else "⏸"
-            preview = (r["text"] or "")[:20] or f"[{r['media_type'] or 'медиа'}]"
-            label = f"{status} Шаг {s} · {r['delay_hours']}ч · {preview}"
+            status = "вњ…" if r["is_active"] else "вЏё"
+            preview = (r["text"] or "")[:20] or f"[{r['media_type'] or 'РјРµРґРёР°'}]"
+            label = f"{status} РЁР°Рі {s} В· {r['delay_hours']}С‡ В· {preview}"
         else:
-            label = f"➕ Шаг {s} (не настроен)"
+            label = f"вћ• РЁР°Рі {s} (РЅРµ РЅР°СЃС‚СЂРѕРµРЅ)"
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"drip_step_{s}")])
 
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
-        "💧 *Drip-цепочка*\n\nВыберите шаг для просмотра или редактирования:",
+        "рџ’§ *Drip-С†РµРїРѕС‡РєР°*\n\nР’С‹Р±РµСЂРёС‚Рµ С€Р°Рі РґР»СЏ РїСЂРѕСЃРјРѕС‚СЂР° РёР»Рё СЂРµРґР°РєС‚РёСЂРѕРІР°РЅРёСЏ:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
     )
@@ -1013,26 +1016,26 @@ async def drip_view_step(query: types.CallbackQuery, state: FSMContext):
     await delete_prev_msgs(query.message.chat.id)
 
     if row:
-        status = "✅ Активен" if row["is_active"] else "⏸ Выключен"
+        status = "вњ… РђРєС‚РёРІРµРЅ" if row["is_active"] else "вЏё Р’С‹РєР»СЋС‡РµРЅ"
         info = (
-            f"💧 *Шаг {step}*\n\n"
-            f"Статус: {status}\n"
-            f"Задержка: `{row['delay_hours']}` ч\n"
-            f"Медиа: `{row['media_type'] or 'нет'}`\n\n"
-            f"Текст:\n{row['text'] or '_(нет)_'}"
+            f"рџ’§ *РЁР°Рі {step}*\n\n"
+            f"РЎС‚Р°С‚СѓСЃ: {status}\n"
+            f"Р—Р°РґРµСЂР¶РєР°: `{row['delay_hours']}` С‡\n"
+            f"РњРµРґРёР°: `{row['media_type'] or 'РЅРµС‚'}`\n\n"
+            f"РўРµРєСЃС‚:\n{row['text'] or '_(РЅРµС‚)_'}"
         )
-        toggle_text = "⏸ Выключить" if row["is_active"] else "✅ Включить"
+        toggle_text = "вЏё Р’С‹РєР»СЋС‡РёС‚СЊ" if row["is_active"] else "вњ… Р’РєР»СЋС‡РёС‚СЊ"
         buttons = [
-            [InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"drip_edit_{step}")],
+            [InlineKeyboardButton(text="вњЏпёЏ Р РµРґР°РєС‚РёСЂРѕРІР°С‚СЊ", callback_data=f"drip_edit_{step}")],
             [InlineKeyboardButton(text=toggle_text, callback_data=f"drip_toggle_{step}")],
-            [InlineKeyboardButton(text="👁 Превью", callback_data=f"drip_preview_{step}")],
-            [InlineKeyboardButton(text="« Назад", callback_data="drip_back")],
+            [InlineKeyboardButton(text="рџ‘Ѓ РџСЂРµРІСЊСЋ", callback_data=f"drip_preview_{step}")],
+            [InlineKeyboardButton(text="В« РќР°Р·Р°Рґ", callback_data="drip_back")],
         ]
     else:
-        info = f"💧 *Шаг {step}*\n\n_(не настроен)_"
+        info = f"рџ’§ *РЁР°Рі {step}*\n\n_(РЅРµ РЅР°СЃС‚СЂРѕРµРЅ)_"
         buttons = [
-            [InlineKeyboardButton(text="➕ Настроить", callback_data=f"drip_edit_{step}")],
-            [InlineKeyboardButton(text="« Назад", callback_data="drip_back")],
+            [InlineKeyboardButton(text="вћ• РќР°СЃС‚СЂРѕРёС‚СЊ", callback_data=f"drip_edit_{step}")],
+            [InlineKeyboardButton(text="В« РќР°Р·Р°Рґ", callback_data="drip_back")],
         ]
 
     msg = await query.message.answer(
@@ -1048,7 +1051,7 @@ async def drip_back(query: types.CallbackQuery, state: FSMContext):
     if not is_admin(query.from_user.id):
         return
     await state.clear()
-    # пересоздаём меню drip
+    # РїРµСЂРµСЃРѕР·РґР°С‘Рј РјРµРЅСЋ drip
     class FakeMsg:
         chat = query.message.chat
         from_user = query.from_user
@@ -1069,7 +1072,7 @@ async def drip_preview(query: types.CallbackQuery, state: FSMContext):
         )).mappings().first()
 
     if not row:
-        await query.answer("Шаг не настроен", show_alert=True)
+        await query.answer("РЁР°Рі РЅРµ РЅР°СЃС‚СЂРѕРµРЅ", show_alert=True)
         return
 
     kb = None
@@ -1087,12 +1090,12 @@ async def drip_preview(query: types.CallbackQuery, state: FSMContext):
         elif mtype == "voice" and mid:
             preview_msg = await query.message.answer_voice(voice=mid, caption=row["text"] or None, reply_markup=kb)
         else:
-            preview_msg = await query.message.answer(row["text"] or "_(пустой шаг)_", parse_mode="Markdown", reply_markup=kb)
+            preview_msg = await query.message.answer(row["text"] or "_(РїСѓСЃС‚РѕР№ С€Р°Рі)_", parse_mode="Markdown", reply_markup=kb)
         remember_msg(query.message.chat.id, preview_msg)
     except Exception as e:
-        await query.answer(f"Ошибка: {e}", show_alert=True)
+        await query.answer(f"РћС€РёР±РєР°: {e}", show_alert=True)
         return
-    await query.answer("👁 Превью отправлено")
+    await query.answer("рџ‘Ѓ РџСЂРµРІСЊСЋ РѕС‚РїСЂР°РІР»РµРЅРѕ")
 
 
 @dp.callback_query(F.data.startswith("drip_toggle_"))
@@ -1111,7 +1114,7 @@ async def drip_toggle(query: types.CallbackQuery, state: FSMContext):
                 {"v": new_val, "s": step}
             )
             await session.commit()
-    await query.answer("✅ Статус изменён")
+    await query.answer("вњ… РЎС‚Р°С‚СѓСЃ РёР·РјРµРЅС‘РЅ")
     await drip_view_step(query, state)
 
 
@@ -1124,7 +1127,7 @@ async def drip_edit_start(query: types.CallbackQuery, state: FSMContext):
     await state.set_state(DripStates.editing_text)
     await delete_prev_msgs(query.message.chat.id)
     msg = await query.message.answer(
-        f"✏️ *Редактирование шага {step}*\n\nВведите текст сообщения или нажмите *Пропустить*:",
+        f"вњЏпёЏ *Р РµРґР°РєС‚РёСЂРѕРІР°РЅРёРµ С€Р°РіР° {step}*\n\nР’РІРµРґРёС‚Рµ С‚РµРєСЃС‚ СЃРѕРѕР±С‰РµРЅРёСЏ РёР»Рё РЅР°Р¶РјРёС‚Рµ *РџСЂРѕРїСѓСЃС‚РёС‚СЊ*:",
         parse_mode="Markdown",
         reply_markup=get_skip_cancel_kb(),
     )
@@ -1140,21 +1143,18 @@ async def drip_got_text(message: types.Message, state: FSMContext):
         await message.delete()
     except Exception:
         pass
-    import json as _json
-    _raw_ent = None
+    # РЎРѕС…СЂР°РЅСЏРµРј entities РґР»СЏ РєР°СЃС‚РѕРјРЅС‹С… СЌРјРѕРґР·Рё
+    entities_json = None
     if message.entities:
         try:
-            _raw_ent = _json.dumps([e.model_dump(exclude_none=True) for e in message.entities])
+            entities_json = json.dumps([e.model_dump() for e in message.entities])
         except Exception:
-            try:
-                _raw_ent = _json.dumps([e.dict(exclude_none=True) for e in message.entities])
-            except Exception:
-                _raw_ent = None
-    await state.update_data(drip_new_text=message.text, drip_new_entities=_raw_ent)
+            pass
+    await state.update_data(drip_new_text=message.text, drip_new_entities=entities_json)
     await state.set_state(DripStates.editing_media)
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
-        "🖼 Отправьте медиа (фото/видео/аудио) или нажмите *Пропустить*:",
+        "рџ–ј РћС‚РїСЂР°РІСЊС‚Рµ РјРµРґРёР° (С„РѕС‚Рѕ/РІРёРґРµРѕ/Р°СѓРґРёРѕ) РёР»Рё РЅР°Р¶РјРёС‚Рµ *РџСЂРѕРїСѓСЃС‚РёС‚СЊ*:",
         parse_mode="Markdown",
         reply_markup=get_skip_cancel_kb(),
     )
@@ -1186,7 +1186,7 @@ async def _drip_ask_button(message: types.Message, state: FSMContext):
     await state.set_state(DripStates.editing_button_text)
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
-        "🔘 Введите текст кнопки или нажмите *Пропустить*:",
+        "рџ” Р’РІРµРґРёС‚Рµ С‚РµРєСЃС‚ РєРЅРѕРїРєРё РёР»Рё РЅР°Р¶РјРёС‚Рµ *РџСЂРѕРїСѓСЃС‚РёС‚СЊ*:",
         parse_mode="Markdown",
         reply_markup=get_skip_cancel_kb(),
     )
@@ -1204,7 +1204,7 @@ async def drip_got_button_text(message: types.Message, state: FSMContext):
     await state.update_data(drip_new_btn_text=message.text)
     await state.set_state(DripStates.editing_button_url)
     await delete_prev_msgs(message.chat.id)
-    msg = await message.answer("🔗 Введите URL кнопки:", reply_markup=get_cancel_kb())
+    msg = await message.answer("рџ”— Р’РІРµРґРёС‚Рµ URL РєРЅРѕРїРєРё:", reply_markup=get_cancel_kb())
     remember_msg(message.chat.id, msg)
 
 
@@ -1220,7 +1220,7 @@ async def drip_got_button_url(message: types.Message, state: FSMContext):
     await state.set_state(DripStates.editing_delay)
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
-        "⏱ Через сколько часов отправить этот шаг после предыдущего?\nВведите число (например: `24`):",
+        "вЏ± Р§РµСЂРµР· СЃРєРѕР»СЊРєРѕ С‡Р°СЃРѕРІ РѕС‚РїСЂР°РІРёС‚СЊ СЌС‚РѕС‚ С€Р°Рі РїРѕСЃР»Рµ РїСЂРµРґС‹РґСѓС‰РµРіРѕ?\nР’РІРµРґРёС‚Рµ С‡РёСЃР»Рѕ (РЅР°РїСЂРёРјРµСЂ: `24`):",
         parse_mode="Markdown",
         reply_markup=get_cancel_kb(),
     )
@@ -1238,18 +1238,18 @@ async def drip_got_delay(message: types.Message, state: FSMContext):
     try:
         delay = int(message.text.strip())
     except ValueError:
-        msg = await message.answer("❌ Введите число. Например: `24`", parse_mode="Markdown")
+        msg = await message.answer("вќЊ Р’РІРµРґРёС‚Рµ С‡РёСЃР»Рѕ. РќР°РїСЂРёРјРµСЂ: `24`", parse_mode="Markdown")
         remember_msg(message.chat.id, msg)
         return
 
     data = await state.get_data()
     step = data.get("drip_editing_step", 0)
     new_text = data.get("drip_new_text")
+    new_entities = data.get("drip_new_entities")
     new_media = data.get("drip_new_media")
     new_media_type = data.get("drip_new_media_type", "none")
     new_btn_text = data.get("drip_new_btn_text")
     new_btn_url = data.get("drip_new_btn_url")
-    new_entities = data.get("drip_new_entities")
     await state.clear()
 
     async with AsyncSessionLocal() as session:
@@ -1274,21 +1274,11 @@ async def drip_got_delay(message: types.Message, state: FSMContext):
 
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
-        f"✅ *Шаг {step} сохранён!*",
+        f"вњ… *РЁР°Рі {step} СЃРѕС…СЂР°РЅС‘РЅ!*",
         parse_mode="Markdown",
         reply_markup=get_admin_keyboard(),
     )
     remember_msg(message.chat.id, msg)
-
-
-# Пропуск медиа при редактировании drip (обрабатывается общим хендлером skip выше)
-# Но нам нужен отдельный для drip_editing_media
-@dp.message(DripStates.editing_media)
-async def drip_skip_media_text(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    # Если не медиа-файл — игнорируем, кнопка Пропустить обработана выше
-    pass
 
 
 # =====================
@@ -1300,7 +1290,7 @@ async def admin_get_file_id(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
     current_state = await state.get_state()
-    # Если в FSM-состоянии — не перехватываем
+    # Р•СЃР»Рё РІ FSM-СЃРѕСЃС‚РѕСЏРЅРёРё вЂ” РЅРµ РїРµСЂРµС…РІР°С‚С‹РІР°РµРј
     if current_state is not None:
         return
     if message.photo:
@@ -1359,7 +1349,7 @@ async def handle_join_request(event: ChatJoinRequest):
 
     try:
         await bot.send_message(event.from_user.id, welcome, reply_markup=markup)
-        # Отправляем step 0 сразу
+        # РћС‚РїСЂР°РІР»СЏРµРј step 0 СЃСЂР°Р·Сѓ
         if dm:
             kb = None
             if (dm.button_text or "").strip() and (dm.button_url or "").strip():
@@ -1369,14 +1359,27 @@ async def handle_join_request(event: ChatJoinRequest):
             text_body = dm.text or ""
             mtype = (dm.media_type or "none").lower()
             mid = dm.media_file_id
+            _cap_ent = None
+            _msg_ent = None
+            if getattr(dm, 'entities', None):
+                try:
+                    _raw = json.loads(dm.entities)
+                    _parsed = [MessageEntity(**e) for e in _raw] if _raw else None
+                    if _parsed:
+                        if mid:
+                            _cap_ent = _parsed
+                        else:
+                            _msg_ent = _parsed
+                except Exception:
+                    pass
             if mtype == "video" and mid:
-                await bot.send_video(event.from_user.id, video=mid, caption=text_body or None, reply_markup=kb)
+                await bot.send_video(event.from_user.id, video=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_ent)
             elif mtype == "photo" and mid:
-                await bot.send_photo(event.from_user.id, photo=mid, caption=text_body or None, reply_markup=kb)
+                await bot.send_photo(event.from_user.id, photo=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_ent)
             elif mtype == "voice" and mid:
-                await bot.send_voice(event.from_user.id, voice=mid, caption=text_body or None, reply_markup=kb)
+                await bot.send_voice(event.from_user.id, voice=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_ent)
             elif text_body:
-                await bot.send_message(event.from_user.id, text_body, reply_markup=kb)
+                await bot.send_message(event.from_user.id, text_body, reply_markup=kb, entities=_msg_ent)
     except TelegramForbiddenError:
         async with AsyncSessionLocal() as session:
             u = await session.get(User, event.from_user.id)
@@ -1385,18 +1388,18 @@ async def handle_join_request(event: ChatJoinRequest):
                 await session.commit()
         return
 
-    # Уведомляем всех админов
+    # РЈРІРµРґРѕРјР»СЏРµРј РІСЃРµС… Р°РґРјРёРЅРѕРІ
     uname = f"@{event.from_user.username}" if event.from_user.username else f"id:{event.from_user.id}"
     for admin_id in ADMIN_IDS:
         asyncio.create_task(notify_and_delete(
             admin_id,
-            f"👤 Новый подписчик: {uname}",
+            f"рџ‘¤ РќРѕРІС‹Р№ РїРѕРґРїРёСЃС‡РёРє: {uname}",
             delay=10
         ))
 
 
 @dp.chat_member(F.chat.id == PAID_CHANNEL_ID)
-async def on_paid_channel_member_updated(event: ChatMemberUpdated):
+async def on_paid_channel_joined(event: ChatMemberUpdated):
     subject = event.new_chat_member.user
     if subject.is_bot:
         return
@@ -1425,14 +1428,55 @@ async def on_paid_channel_member_updated(event: ChatMemberUpdated):
         )
         await session.commit()
 
-    # Уведомляем всех админов
+    # РЈРІРµРґРѕРјР»СЏРµРј РІСЃРµС… Р°РґРјРёРЅРѕРІ
     uname = f"@{subject.username}" if subject.username else f"id:{uid}"
     for admin_id in ADMIN_IDS:
         asyncio.create_task(notify_and_delete(
             admin_id,
-            f"👑 Новый VIP: {uname}",
+            f"рџ‘‘ РќРѕРІС‹Р№ VIP: {uname}",
             delay=10
         ))
+
+
+@dp.chat_member(F.chat.id == FREE_CHANNEL_ID)
+async def on_free_channel_member_updated(event: ChatMemberUpdated):
+    subject = event.new_chat_member.user
+    if subject.is_bot:
+        return
+    old_status = event.old_chat_member.status
+    new_status = event.new_chat_member.status
+    uname = f"@{subject.username}" if subject.username else f"id:{subject.id}"
+    # РћС‚РїРёСЃР°Р»СЃСЏ РѕС‚ free-РєР°РЅР°Р»Р°
+    if old_status in _MEMBER_LIKE and new_status not in _MEMBER_LIKE:
+        for admin_id in ADMIN_IDS:
+            asyncio.create_task(notify_and_delete(
+                admin_id,
+                f"рџљЄ Free: {uname} РѕС‚РїРёСЃР°Р»СЃСЏ ({new_status})",
+                delay=10
+            ))
+
+
+@dp.chat_member(F.chat.id == PAID_CHANNEL_ID)
+async def on_paid_channel_left(event: ChatMemberUpdated):
+    subject = event.new_chat_member.user
+    if subject.is_bot:
+        return
+    old_status = event.old_chat_member.status
+    new_status = event.new_chat_member.status
+    uname = f"@{subject.username}" if subject.username else f"id:{subject.id}"
+    # РћС‚РїРёСЃР°Р»СЃСЏ РѕС‚ paid-РєР°РЅР°Р»Р°
+    if old_status in _MEMBER_LIKE and new_status not in _MEMBER_LIKE:
+        async with AsyncSessionLocal() as session:
+            u = await session.get(User, subject.id)
+            if u:
+                u.is_vip = False
+                await session.commit()
+        for admin_id in ADMIN_IDS:
+            asyncio.create_task(notify_and_delete(
+                admin_id,
+                f"рџ”ґ VIP: {uname} РѕС‚РїРёСЃР°Р»СЃСЏ ({new_status})",
+                delay=10
+            ))
 
 
 # =====================
@@ -1500,26 +1544,30 @@ async def drip_worker(stop: asyncio.Event):
                         mtype = (dm.media_type or "none").lower()
                         mid = dm.media_file_id
 
-                        import json as _json
-                        from aiogram.types import MessageEntity as _ME
-                        _msg_ent = None
-                        _cap_ent = None
+                        # Р”РµСЃРµСЂРёР°Р»РёР·СѓРµРј entities РґР»СЏ РєР°СЃС‚РѕРјРЅС‹С… СЌРјРѕРґР·Рё
+                        msg_entities = None
+                        cap_entities = None
                         if getattr(dm, 'entities', None):
                             try:
-                                _parsed = [_ME(**e) for e in _json.loads(dm.entities)]
-                                if _parsed:
-                                    (_cap_ent if mid else _msg_ent); _msg_ent = None if mid else _parsed; _cap_ent = _parsed if mid else None
+                                raw = json.loads(dm.entities)
+                                parsed = [MessageEntity(**e) for e in raw] if raw else None
+                                if parsed:
+                                    if mid:
+                                        cap_entities = parsed
+                                    else:
+                                        msg_entities = parsed
                             except Exception:
                                 pass
+
                         try:
                             if mtype == "video" and mid:
-                                await telegram_with_flood_retry(lambda: bot.send_video(uid, video=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_ent))
+                                await telegram_with_flood_retry(lambda: bot.send_video(uid, video=mid, caption=text_body or None, reply_markup=kb, caption_entities=cap_entities))
                             elif mtype == "photo" and mid:
-                                await telegram_with_flood_retry(lambda: bot.send_photo(uid, photo=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_ent))
+                                await telegram_with_flood_retry(lambda: bot.send_photo(uid, photo=mid, caption=text_body or None, reply_markup=kb, caption_entities=cap_entities))
                             elif mtype == "voice" and mid:
-                                await telegram_with_flood_retry(lambda: bot.send_voice(uid, voice=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_ent))
+                                await telegram_with_flood_retry(lambda: bot.send_voice(uid, voice=mid, caption=text_body or None, reply_markup=kb, caption_entities=cap_entities))
                             else:
-                                await telegram_with_flood_retry(lambda: bot.send_message(uid, text_body, reply_markup=kb, entities=_msg_ent))
+                                await telegram_with_flood_retry(lambda: bot.send_message(uid, text_body, reply_markup=kb, entities=msg_entities))
                         except TelegramForbiddenError:
                             urow = await session.get(User, uid)
                             if urow:
@@ -1550,7 +1598,7 @@ async def drip_worker(stop: asyncio.Event):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logging.error(f"Drip worker error: {e}")
+            logging.error("Drip worker error", exc_info=True)
         await interruptible_sleep(300.0, stop)
 
 
@@ -1628,7 +1676,7 @@ async def check_scheduled_posts(stop: asyncio.Event):
                                 logging.error(f"Post id={post_id} has no text or media, skipping")
                                 continue
                         except Exception as e:
-                            logging.error(f"Post error id={post_id}: {e}")
+                            logging.error(f"Post error id={post_id}", exc_info=True)
                             continue
 
                         await session.execute(
@@ -1641,7 +1689,7 @@ async def check_scheduled_posts(stop: asyncio.Event):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logging.error(f"Scheduler error: {e}")
+            logging.error("Scheduler error", exc_info=True)
         await interruptible_sleep(60.0, stop)
 
 
@@ -1706,7 +1754,10 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
 
-    poll_task = asyncio.create_task(dp.start_polling(bot))
+    poll_task = asyncio.create_task(dp.start_polling(
+        bot,
+        allowed_updates=["message", "callback_query", "chat_member", "chat_join_request"],
+    ))
     shutdown_wait = asyncio.create_task(shutdown_req.wait())
     await asyncio.wait({poll_task, shutdown_wait}, return_when=asyncio.FIRST_COMPLETED)
 
