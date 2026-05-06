@@ -1271,24 +1271,31 @@ async def drip_got_delay(message: types.Message, state: FSMContext):
     await state.clear()
 
     async with AsyncSessionLocal() as session:
-        await session.execute(
-            text("""
-                INSERT INTO drip_messages (step, text, media_file_id, media_type, button_text, button_url, delay_hours, is_active, entities)
-                VALUES (:s, :t, :m, :mt, :bt, :bu, :dh, true, :ent)
-                ON CONFLICT (step) DO UPDATE SET
-                    text = EXCLUDED.text,
-                    media_file_id = EXCLUDED.media_file_id,
-                    media_type = EXCLUDED.media_type,
-                    button_text = EXCLUDED.button_text,
-                    button_url = EXCLUDED.button_url,
-                    delay_hours = EXCLUDED.delay_hours,
-                    is_active = true,
-                    entities = EXCLUDED.entities
-            """),
-            {"s": step, "t": new_text, "m": new_media, "mt": new_media_type or "none",
-             "bt": new_btn_text, "bu": new_btn_url, "dh": delay, "ent": new_entities},
-        )
-        await session.commit()
+        try:
+            await session.execute(
+                text("""
+                    INSERT INTO drip_messages (step, text, media_file_id, media_type, button_text, button_url, delay_hours, is_active, entities)
+                    VALUES (:s, :t, :m, :mt, :bt, :bu, :dh, true, :ent)
+                    ON CONFLICT (step) DO UPDATE SET
+                        text = EXCLUDED.text,
+                        media_file_id = EXCLUDED.media_file_id,
+                        media_type = EXCLUDED.media_type,
+                        button_text = EXCLUDED.button_text,
+                        button_url = EXCLUDED.button_url,
+                        delay_hours = EXCLUDED.delay_hours,
+                        is_active = true,
+                        entities = EXCLUDED.entities
+                """),
+                {"s": step, "t": new_text, "m": new_media, "mt": new_media_type or "none",
+                 "bt": new_btn_text, "bu": new_btn_url, "dh": delay, "ent": new_entities},
+            )
+            await session.commit()
+            logging.info(f"drip step {step} saved OK, entities_len={len(new_entities) if new_entities else 0}")
+        except Exception:
+            logging.error(f"drip step {step} INSERT failed", exc_info=True)
+            await session.rollback()
+            await message.answer("❌ Ошибка сохранения шага. Смотри логи Render.")
+            return
 
     await delete_prev_msgs(message.chat.id)
     msg = await message.answer(
