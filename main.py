@@ -1080,17 +1080,34 @@ async def drip_preview(query: types.CallbackQuery, state: FSMContext):
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=row["button_text"], url=row["button_url"])
         ]])
+
+    # Десериализуем entities для кастомных эмодзи
+    cap_ent = None
+    msg_ent = None
+    if row.get("entities"):
+        try:
+            raw = json.loads(row["entities"])
+            parsed = [MessageEntity(**e) for e in raw] if raw else None
+            if parsed:
+                if row.get("media_file_id"):
+                    cap_ent = parsed
+                else:
+                    msg_ent = parsed
+        except Exception:
+            pass
+
     try:
         mtype = (row["media_type"] or "none").lower()
         mid = row["media_file_id"]
+        txt = row["text"] or None
         if mtype == "photo" and mid:
-            preview_msg = await query.message.answer_photo(photo=mid, caption=row["text"] or None, reply_markup=kb)
+            preview_msg = await query.message.answer_photo(photo=mid, caption=txt, reply_markup=kb, caption_entities=cap_ent)
         elif mtype == "video" and mid:
-            preview_msg = await query.message.answer_video(video=mid, caption=row["text"] or None, reply_markup=kb)
+            preview_msg = await query.message.answer_video(video=mid, caption=txt, reply_markup=kb, caption_entities=cap_ent)
         elif mtype == "voice" and mid:
-            preview_msg = await query.message.answer_voice(voice=mid, caption=row["text"] or None, reply_markup=kb)
+            preview_msg = await query.message.answer_voice(voice=mid, caption=txt, reply_markup=kb, caption_entities=cap_ent)
         else:
-            preview_msg = await query.message.answer(row["text"] or "_(пустой шаг)_", parse_mode="Markdown", reply_markup=kb)
+            preview_msg = await query.message.answer(txt or "_(пустой шаг)_", entities=msg_ent, reply_markup=kb)
         remember_msg(query.message.chat.id, preview_msg)
     except Exception as e:
         await query.answer(f"Ошибка: {e}", show_alert=True)
@@ -1139,8 +1156,6 @@ async def drip_edit_start(query: types.CallbackQuery, state: FSMContext):
 async def drip_got_text(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-    # ВРЕМЕННО: логируем что приходит
-    logging.info(f"drip_got_text: text={repr(message.text)}, entities={message.entities}")
     try:
         await message.delete()
     except Exception:
@@ -1252,6 +1267,7 @@ async def drip_got_delay(message: types.Message, state: FSMContext):
     new_media_type = data.get("drip_new_media_type", "none")
     new_btn_text = data.get("drip_new_btn_text")
     new_btn_url = data.get("drip_new_btn_url")
+    logging.info(f"drip_got_delay: step={step}, entities_len={len(new_entities) if new_entities else 0}, entities={new_entities[:100] if new_entities else None}")
     await state.clear()
 
     async with AsyncSessionLocal() as session:
