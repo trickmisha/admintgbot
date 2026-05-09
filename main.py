@@ -125,11 +125,13 @@ class ContentQueue(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     text = Column(String)
     media_id = Column(String)
+    media_type = Column(String, default="photo")
     price = Column(Integer, default=0)
     post_type = Column(String, default="free")
     channel = Column(String, default="free")
     button_text = Column(String)
     button_url = Column(String)
+    entities = Column(String)
     scheduled_at = Column(DateTime)
     status = Column(String, default="pending")
 
@@ -144,8 +146,6 @@ class DripMessage(Base):
     media_type = Column(String)
     button_text = Column(String)
     button_url = Column(String)
-    button2_text = Column(String)  # Вторая кнопка (только для шага 0)
-    button2_url = Column(String)   # Вторая кнопка (только для шага 0)
     delay_hours = Column(Integer, default=24)
     is_active = Column(Boolean, default=True)
     entities = Column(String)  # JSON-сериализованные MessageEntity для кастомных эмодзи
@@ -157,6 +157,16 @@ class DripProgress(Base):
     current_step = Column(Integer, default=0)
     next_send_at = Column(DateTime)
     is_active = Column(Boolean, default=True)
+
+
+class Broadcast(Base):
+    __tablename__ = "broadcasts"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    text = Column(String)
+    media_file_id = Column(String)
+    target = Column(String)
+    status = Column(String, default="pending")
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC).replace(tzinfo=None))
 
 
 engine = create_async_engine(
@@ -218,7 +228,6 @@ async def redis_get_all_drip_steps() -> list[dict]:
                 "step": s, "text": None, "entities": None,
                 "media_file_id": None, "media_type": "none",
                 "button_text": None, "button_url": None,
-                "button2_text": None, "button2_url": None,
                 "delay_hours": 24, "is_active": True,
             })
     return steps
@@ -233,6 +242,8 @@ class AdminStates(StatesGroup):
 
 class PostStates(StatesGroup):
     choosing_channel = State()
+    choosing_post_type = State()    # бесплатный или платный Stars
+    waiting_stars_price = State()   # цена в Stars (только для платного)
     waiting_media = State()
     waiting_text = State()
     waiting_button_text = State()
@@ -247,8 +258,6 @@ class DripStates(StatesGroup):
     editing_media = State()
     editing_button_text = State()
     editing_button_url = State()
-    editing_button2_text = State()
-    editing_button2_url = State()
     editing_delay = State()
 
 
@@ -413,7 +422,7 @@ async def admin_skip(m: types.Message, state: FSMContext):
         await state.update_data(media_id=None, media_type=None)
         await _ask_post_text(m, state)
     elif current == PostStates.waiting_text:
-        await state.update_data(post_text=None)
+        await state.update_data(post_text=None, post_entities=None)
         await _ask_post_button(m, state)
     elif current == PostStates.waiting_button_text:
         await state.update_data(button_text=None, button_url=None)
@@ -435,12 +444,14 @@ async def admin_skip(m: types.Message, state: FSMContext):
         await state.update_data(drip_new_media=None, drip_new_media_type=None)
         await _drip_ask_button(m, state)
     elif current == DripStates.editing_button_text:
-        await state.update_data(drip_new_btn_text=None, drip_new_btn_url=None,
-                                drip_new_btn2_text=None, drip_new_btn2_url=None)
-        await _drip_ask_delay(m, state)
-    elif current == DripStates.editing_button2_text:
-        await state.update_data(drip_new_btn2_text=None, drip_new_btn2_url=None)
-        await _drip_ask_delay(m, state)
+        await state.update_data(drip_new_btn_text=None, drip_new_btn_url=None)
+        await state.set_state(DripStates.editing_delay)
+        await delete_prev_msgs(m.chat.id)
+        msg = await m.answer(
+            "⏱ Через сколько часов отправить шаг?\nВведите число (например: `24`):",
+            parse_mode="Markdown", reply_markup=get_cancel_kb(),
+        )
+        remember_msg(m.chat.id, msg)
 
 
 # --- /start ---
@@ -662,8 +673,10 @@ async def post_create_start(query: types.CallbackQuery, state: FSMContext):
     if not is_admin(query.from_user.id):
         return
     await state.set_state(PostStates.choosing_channel)
-    await state.update_data(media_id=None, media_type=None, post_text=None,
-                             button_text=None, button_url=None)
+    await state.update_data(
+        media_id=None, media_type=None, post_text=None, post_entities=None,
+        button_text=None, button_url=None, post_type="free", stars_price=None,
+    )
     await delete_prev_msgs(query.message.chat.id)
     msg = await query.message.answer(
         "📡 Выберите канал для публикации:",
@@ -682,17 +695,96 @@ async def post_choose_channel(query: types.CallbackQuery, state: FSMContext):
         return
     channel = "free" if query.data == "post_ch_free" else "paid"
     await state.update_data(channel=channel)
-    await state.set_state(PostStates.waiting_media)
+    await state.set_state(PostStates.choosing_post_type)
     await delete_prev_msgs(query.message.chat.id)
+    ch_label = "🆓 Free" if channel == "free" else "👑 Paid"
     msg = await query.message.answer(
-        f"📡 Канал: *{'Free' if channel == 'free' else 'Paid'}*\n\n"
-        "🖼 Отправьте фото, видео или аудио (будет как голосовое).\n"
-        "Или нажмите *Пропустить* если пост без медиа.",
+        f"📡 Канал: *{ch_label}*\n\n"
+        "💰 Выберите тип поста:",
         parse_mode="Markdown",
-        reply_markup=get_skip_cancel_kb(),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🆓 Бесплатный", callback_data="post_type_free"),
+            InlineKeyboardButton(text="⭐ Платный (Stars)", callback_data="post_type_paid"),
+        ]]),
     )
     remember_msg(query.message.chat.id, msg)
     await query.answer()
+
+
+@dp.callback_query(PostStates.choosing_post_type, F.data.in_(("post_type_free", "post_type_paid")))
+async def post_choose_type(query: types.CallbackQuery, state: FSMContext):
+    if not is_admin(query.from_user.id):
+        return
+    post_type = "free" if query.data == "post_type_free" else "paid"
+    await state.update_data(post_type=post_type, stars_price=None)
+    if post_type == "paid":
+        await state.set_state(PostStates.waiting_stars_price)
+        await delete_prev_msgs(query.message.chat.id)
+        msg = await query.message.answer(
+            "⭐ *Платный пост (Stars)*\n\n"
+            "Введите цену в Telegram Stars — целое число от 1.\n"
+            "Например: `50`\n\n"
+            "⚠️ Платный пост поддерживает только *фото или видео*. Голосовые нельзя.",
+            parse_mode="Markdown",
+            reply_markup=get_cancel_kb(),
+        )
+        remember_msg(query.message.chat.id, msg)
+    else:
+        await _ask_post_media(query.message, state)
+    await query.answer()
+
+
+@dp.message(PostStates.waiting_stars_price)
+async def post_got_stars_price(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    raw = (message.text or "").strip()
+    try:
+        price = int(raw)
+        if price < 1:
+            raise ValueError
+    except (ValueError, AttributeError):
+        msg = await message.answer(
+            "❌ Некорректная цена. Введите целое число от 1, например `50`:",
+            parse_mode="Markdown",
+            reply_markup=get_cancel_kb(),
+        )
+        remember_msg(message.chat.id, msg)
+        return
+    await state.update_data(stars_price=price)
+    await _ask_post_media(message, state)
+
+
+async def _ask_post_media(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    post_type = data.get("post_type", "free")
+    stars_price = data.get("stars_price")
+    channel = data.get("channel", "free")
+    ch_label = "🆓 Free" if channel == "free" else "👑 Paid"
+    if post_type == "paid":
+        type_label = f"⭐ Платный ({stars_price} Stars)"
+        media_hint = (
+            "🖼 Отправьте *фото или видео*.\n\n"
+            "⚠️ Голосовые и аудио недоступны для платных постов."
+        )
+    else:
+        type_label = "🆓 Бесплатный"
+        media_hint = (
+            "🖼 Отправьте фото, видео или голосовое.\n"
+            "Или нажмите *Пропустить* если пост без медиа."
+        )
+    await state.set_state(PostStates.waiting_media)
+    await delete_prev_msgs(message.chat.id)
+    msg = await message.answer(
+        f"📡 Канал: *{ch_label}* | Тип: *{type_label}*\n\n{media_hint}",
+        parse_mode="Markdown",
+        reply_markup=get_skip_cancel_kb() if post_type == "free" else get_cancel_kb(),
+    )
+    remember_msg(message.chat.id, msg)
 
 
 @dp.message(PostStates.waiting_media, F.photo | F.video | F.audio | F.voice)
@@ -703,21 +795,31 @@ async def post_got_media(message: types.Message, state: FSMContext):
         await message.delete()
     except Exception:
         pass
+    data = await state.get_data()
+    post_type = data.get("post_type", "free")
+
     if message.photo:
         media_id = message.photo[-1].file_id
         media_type = "photo"
     elif message.video:
         media_id = message.video.file_id
         media_type = "video"
-    elif message.voice:
-        media_id = message.voice.file_id
+    elif message.voice or message.audio:
+        # Голосовые/аудио недоступны для платных постов
+        if post_type == "paid":
+            msg = await message.answer(
+                "⚠️ Голосовые и аудио нельзя использовать в платных постах (ограничение Telegram).\n"
+                "Отправьте фото или видео:",
+                reply_markup=get_cancel_kb(),
+            )
+            remember_msg(message.chat.id, msg)
+            return
+        media_id = (message.voice or message.audio).file_id
         media_type = "voice"
-    elif message.audio:
-        media_id = message.audio.file_id
-        media_type = "voice"  # публикуем аудио как голосовое
     else:
         media_id = None
         media_type = None
+
     await state.update_data(media_id=media_id, media_type=media_type)
     await _ask_post_text(message, state)
 
@@ -731,10 +833,19 @@ async def post_got_media_document(message: types.Message, state: FSMContext):
         await message.delete()
     except Exception:
         pass
+    data = await state.get_data()
+    post_type = data.get("post_type", "free")
     doc = message.document
     mime = (doc.mime_type or "").lower()
     fname = (doc.file_name or "").lower()
     if "ogg" in mime or "audio" in mime or "opus" in mime or fname.endswith((".ogg", ".opus", ".mp3", ".m4a")):
+        if post_type == "paid":
+            msg = await message.answer(
+                "⚠️ Голосовые и аудио нельзя использовать в платных постах.\nОтправьте фото или видео:",
+                reply_markup=get_cancel_kb(),
+            )
+            remember_msg(message.chat.id, msg)
+            return
         media_id = doc.file_id
         media_type = "voice"
     else:
@@ -753,7 +864,14 @@ async def post_got_text(message: types.Message, state: FSMContext):
         await message.delete()
     except Exception:
         pass
-    await state.update_data(post_text=message.text)
+    # Сохраняем entities — нужны для кастомных эмодзи
+    entities_json = None
+    if message.entities:
+        try:
+            entities_json = json.dumps([e.model_dump() for e in message.entities])
+        except Exception:
+            pass
+    await state.update_data(post_text=message.text, post_entities=entities_json)
     await _ask_post_button(message, state)
 
 
@@ -836,45 +954,83 @@ async def _show_post_preview(message: types.Message, state: FSMContext):
     await delete_prev_msgs(message.chat.id)
 
     channel = data.get("channel", "free")
+    post_type = data.get("post_type", "free")
+    stars_price = data.get("stars_price") or 0
     media_id = data.get("media_id")
     media_type = data.get("media_type")
     post_text = data.get("post_text") or ""
+    post_entities = data.get("post_entities")
     button_text = data.get("button_text")
     button_url = data.get("button_url")
     publish_now = data.get("publish_now", True)
     scheduled_at_raw = data.get("scheduled_at")
     scheduled_at = datetime.fromisoformat(scheduled_at_raw) if scheduled_at_raw else None
-    # Переводим в локальное время для отображения
     scheduled_at_local = (scheduled_at + timedelta(hours=TIMEZONE_OFFSET)) if scheduled_at else None
 
-    # Строим клавиатуру превью
+    # Десериализуем entities
+    parsed_entities = None
+    if post_entities:
+        try:
+            raw = json.loads(post_entities)
+            parsed_entities = [MessageEntity(**e) for e in raw] if raw else None
+        except Exception:
+            pass
+
+    # Клавиатура для превью
     preview_kb = None
     if button_text and button_url:
         preview_kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=button_text, url=button_url)
         ]])
 
-    # Показываем превью
-    time_str = "сейчас" if publish_now else (scheduled_at_local.strftime("%d.%m.%Y %H:%M") + " (Томск)" if scheduled_at_local else "—")
+    ch_label = "🆓 Free" if channel == "free" else "👑 Paid"
+    type_label = f"⭐ Платный ({stars_price} Stars)" if post_type == "paid" else "🆓 Бесплатный"
+    time_str = "сейчас" if publish_now else (
+        scheduled_at_local.strftime("%d.%m.%Y %H:%M") + " (Томск)" if scheduled_at_local else "—"
+    )
+
     info = (
         f"👁 *Превью поста*\n\n"
-        f"📡 Канал: *{'Free' if channel == 'free' else 'Paid'}*\n"
-        f"⏰ {'Публикация: ' + time_str}\n\n"
-        f"Так будет выглядеть пост:"
+        f"📡 Канал: *{ch_label}*\n"
+        f"💰 Тип: *{type_label}*\n"
+        f"⏰ Публикация: {time_str}\n\n"
+        f"Так будет выглядеть контент:"
     )
+    if post_type == "paid":
+        info += "\n\n⚠️ _В реальном посте медиа скрыто за оплатой Stars. Превью показывает контент без замка._"
+
     msg_info = await message.answer(info, parse_mode="Markdown")
     remember_msg(message.chat.id, msg_info)
 
-    # Отправляем само превью
+    # Отправляем превью контента
     try:
         if media_type == "photo" and media_id:
-            preview_msg = await message.answer_photo(photo=media_id, caption=post_text or None, reply_markup=preview_kb)
+            preview_msg = await message.answer_photo(
+                photo=media_id,
+                caption=post_text or None,
+                caption_entities=parsed_entities if media_id else None,
+                reply_markup=preview_kb,
+            )
         elif media_type == "video" and media_id:
-            preview_msg = await message.answer_video(video=media_id, caption=post_text or None, reply_markup=preview_kb)
+            preview_msg = await message.answer_video(
+                video=media_id,
+                caption=post_text or None,
+                caption_entities=parsed_entities if media_id else None,
+                reply_markup=preview_kb,
+            )
         elif media_type == "voice" and media_id:
-            preview_msg = await message.answer_voice(voice=media_id, caption=post_text or None, reply_markup=preview_kb)
+            preview_msg = await message.answer_voice(
+                voice=media_id,
+                caption=post_text or None,
+                caption_entities=parsed_entities if media_id else None,
+                reply_markup=preview_kb,
+            )
         elif post_text:
-            preview_msg = await message.answer(post_text, reply_markup=preview_kb)
+            preview_msg = await message.answer(
+                post_text,
+                entities=parsed_entities,
+                reply_markup=preview_kb,
+            )
         else:
             preview_msg = await message.answer("_(пустой пост)_", parse_mode="Markdown")
         remember_msg(message.chat.id, preview_msg)
@@ -882,7 +1038,6 @@ async def _show_post_preview(message: types.Message, state: FSMContext):
         err_msg = await message.answer(f"⚠️ Не удалось показать превью: {e}")
         remember_msg(message.chat.id, err_msg)
 
-    # Кнопки подтверждения
     confirm_msg = await message.answer(
         "Подтвердите публикацию:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
@@ -912,9 +1067,12 @@ async def post_confirm(query: types.CallbackQuery, state: FSMContext):
     await state.clear()
 
     channel = data.get("channel", "free")
+    post_type = data.get("post_type", "free")
+    stars_price = data.get("stars_price") or 0
     media_id = data.get("media_id")
     media_type = data.get("media_type")
     post_text = data.get("post_text")
+    post_entities = data.get("post_entities")
     button_text = data.get("button_text")
     button_url = data.get("button_url")
     publish_now = data.get("publish_now", True)
@@ -929,12 +1087,17 @@ async def post_confirm(query: types.CallbackQuery, state: FSMContext):
         await session.execute(
             text(
                 "INSERT INTO content_queue "
-                "(text, media_id, price, post_type, channel, button_text, button_url, scheduled_at, status, media_type) "
-                "VALUES (:text, :mid, 0, :pt, :ch, :bt, :bu, :sa, 'pending', :mt)"
+                "(text, media_id, media_type, price, post_type, channel, "
+                "button_text, button_url, entities, scheduled_at, status) "
+                "VALUES (:text, :mid, :mt, :price, :pt, :ch, "
+                ":bt, :bu, :ent, :sa, 'pending')"
             ),
-            {"text": post_text, "mid": media_id, "ch": channel,
-             "pt": channel,  # post_type = channel (free/paid)
-             "bt": button_text, "bu": button_url, "sa": sched, "mt": data.get("media_type")},
+            {
+                "text": post_text, "mid": media_id, "mt": media_type,
+                "price": stars_price, "pt": post_type, "ch": channel,
+                "bt": button_text, "bu": button_url,
+                "ent": post_entities, "sa": sched,
+            },
         )
         await session.commit()
 
@@ -1051,7 +1214,7 @@ async def drip_view_step(query: types.CallbackQuery, state: FSMContext):
         info = (
             f"💧 *Шаг {step}*\n\n"
             f"Статус: {status}\n"
-            f"Задержка: `{'5 мин (фиксировано)' if step == 0 else str(row.get('delay_hours', 24)) + ' ч'}`\n"
+            f"Задержка: `{row.get('delay_hours', 24)}` ч\n"
             f"Медиа: `{row.get('media_type') or 'нет'}`\n\n"
             f"Текст:\n{row.get('text') or '_(нет)_'}"
         )
@@ -1103,17 +1266,10 @@ async def drip_preview(query: types.CallbackQuery, state: FSMContext):
         return
 
     kb = None
-    btn1t = (row.get("button_text") or "").strip()
-    btn1u = (row.get("button_url") or "").strip()
-    btn2t = (row.get("button2_text") or "").strip()
-    btn2u = (row.get("button2_url") or "").strip()
-    rows_kb = []
-    if btn1t and btn1u:
-        rows_kb.append([InlineKeyboardButton(text=btn1t, url=btn1u)])
-    if btn2t and btn2u:
-        rows_kb.append([InlineKeyboardButton(text=btn2t, url=btn2u)])
-    if rows_kb:
-        kb = InlineKeyboardMarkup(inline_keyboard=rows_kb)
+    if (row.get("button_text") or "").strip() and (row.get("button_url") or "").strip():
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=row["button_text"], url=row["button_url"])
+        ]])
 
     # Десериализуем entities для кастомных эмодзи
     cap_ent = None
@@ -1237,17 +1393,6 @@ async def _drip_ask_button(message: types.Message, state: FSMContext):
     remember_msg(message.chat.id, msg)
 
 
-async def _drip_ask_delay(message: types.Message, state: FSMContext):
-    await state.set_state(DripStates.editing_delay)
-    await delete_prev_msgs(message.chat.id)
-    msg = await message.answer(
-        "⏱ Через сколько часов отправить этот шаг после предыдущего?\nВведите число (например: `24`):",
-        parse_mode="Markdown",
-        reply_markup=get_cancel_kb(),
-    )
-    remember_msg(message.chat.id, msg)
-
-
 @dp.message(DripStates.editing_button_text)
 async def drip_got_button_text(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
@@ -1272,49 +1417,14 @@ async def drip_got_button_url(message: types.Message, state: FSMContext):
     except Exception:
         pass
     await state.update_data(drip_new_btn_url=message.text)
-
-    data = await state.get_data()
-    step = data.get("drip_editing_step", 0)
-
-    # Для шага 0 предлагаем настроить вторую кнопку
-    if step == 0:
-        await state.set_state(DripStates.editing_button2_text)
-        await delete_prev_msgs(message.chat.id)
-        msg = await message.answer(
-            "🔘 *Шаг 0 поддерживает 2 кнопки.*\n\nВведите текст второй кнопки или нажмите *Пропустить*:",
-            parse_mode="Markdown",
-            reply_markup=get_skip_cancel_kb(),
-        )
-        remember_msg(message.chat.id, msg)
-    else:
-        await _drip_ask_delay(message, state)
-
-
-@dp.message(DripStates.editing_button2_text)
-async def drip_got_button2_text(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    try:
-        await message.delete()
-    except Exception:
-        pass
-    await state.update_data(drip_new_btn2_text=message.text)
-    await state.set_state(DripStates.editing_button2_url)
+    await state.set_state(DripStates.editing_delay)
     await delete_prev_msgs(message.chat.id)
-    msg = await message.answer("🔗 Введите URL второй кнопки:", reply_markup=get_cancel_kb())
+    msg = await message.answer(
+        "⏱ Через сколько часов отправить этот шаг после предыдущего?\nВведите число (например: `24`):",
+        parse_mode="Markdown",
+        reply_markup=get_cancel_kb(),
+    )
     remember_msg(message.chat.id, msg)
-
-
-@dp.message(DripStates.editing_button2_url)
-async def drip_got_button2_url(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    try:
-        await message.delete()
-    except Exception:
-        pass
-    await state.update_data(drip_new_btn2_url=message.text)
-    await _drip_ask_delay(message, state)
 
 
 @dp.message(DripStates.editing_delay)
@@ -1340,8 +1450,6 @@ async def drip_got_delay(message: types.Message, state: FSMContext):
     new_media_type = data.get("drip_new_media_type", "none")
     new_btn_text = data.get("drip_new_btn_text")
     new_btn_url = data.get("drip_new_btn_url")
-    new_btn2_text = data.get("drip_new_btn2_text")
-    new_btn2_url = data.get("drip_new_btn2_url")
     await state.clear()
 
     # Сохраняем в Redis
@@ -1353,8 +1461,6 @@ async def drip_got_delay(message: types.Message, state: FSMContext):
         "media_type": new_media_type or "none",
         "button_text": new_btn_text,
         "button_url": new_btn_url,
-        "button2_text": new_btn2_text,
-        "button2_url": new_btn2_url,
         "delay_hours": delay,
         "is_active": existing.get("is_active", True),
     }
@@ -1429,26 +1535,48 @@ async def handle_join_request(event: ChatJoinRequest):
 
     if dm_active:
         async with AsyncSessionLocal() as session:
-            # Баг 2: не запускаем drip если юзер уже VIP
-            existing_user = await session.get(User, event.from_user.id)
-            if existing_user and existing_user.is_vip:
-                pass  # VIP — drip не нужен
-            else:
-                # Баг 5: не сбрасываем прогресс если цепочка уже активна
-                existing_prog = await session.get(DripProgress, event.from_user.id)
-                if not existing_prog or not existing_prog.is_active:
-                    next_at = now_naive + timedelta(minutes=5)
-                    await session.merge(DripProgress(
-                        user_id=event.from_user.id,
-                        current_step=0,
-                        next_send_at=next_at,
-                        is_active=True,
-                    ))
-                    await session.commit()
+            next_at = now_naive + timedelta(hours=dm.get("delay_hours") or 24)
+            await session.merge(DripProgress(
+                user_id=event.from_user.id,
+                current_step=1,
+                next_send_at=next_at,
+                is_active=True,
+            ))
+            await session.commit()
 
     try:
         await bot.send_message(event.from_user.id, welcome, reply_markup=markup)
-        # Step 0 отправляется воркером через 5 минут — здесь ничего не шлём
+        # Отправляем step 0 сразу
+        if dm_active:
+            kb = None
+            if (dm.get("button_text") or "").strip() and (dm.get("button_url") or "").strip():
+                kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text=dm["button_text"], url=dm["button_url"])
+                ]])
+            text_body = dm.get("text") or ""
+            mtype = (dm.get("media_type") or "none").lower()
+            mid = dm.get("media_file_id")
+            _cap_ent = None
+            _msg_ent = None
+            if dm.get("entities"):
+                try:
+                    _raw = json.loads(dm["entities"])
+                    _parsed = [MessageEntity(**e) for e in _raw] if _raw else None
+                    if _parsed:
+                        if mid:
+                            _cap_ent = _parsed
+                        else:
+                            _msg_ent = _parsed
+                except Exception:
+                    pass
+            if mtype == "video" and mid:
+                await bot.send_video(event.from_user.id, video=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_ent)
+            elif mtype == "photo" and mid:
+                await bot.send_photo(event.from_user.id, photo=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_ent)
+            elif mtype == "voice" and mid:
+                await bot.send_voice(event.from_user.id, voice=mid, caption=text_body or None, reply_markup=kb, caption_entities=_cap_ent)
+            elif text_body:
+                await bot.send_message(event.from_user.id, text_body, reply_markup=kb, entities=_msg_ent)
     except TelegramForbiddenError:
         async with AsyncSessionLocal() as session:
             u = await session.get(User, event.from_user.id)
@@ -1601,17 +1729,10 @@ async def drip_worker(stop: asyncio.Event):
                             continue
 
                         kb = None
-                        btn1t = (dm.get("button_text") or "").strip()
-                        btn1u = (dm.get("button_url") or "").strip()
-                        btn2t = (dm.get("button2_text") or "").strip()
-                        btn2u = (dm.get("button2_url") or "").strip()
-                        rows = []
-                        if btn1t and btn1u:
-                            rows.append([InlineKeyboardButton(text=btn1t, url=btn1u)])
-                        if btn2t and btn2u:
-                            rows.append([InlineKeyboardButton(text=btn2t, url=btn2u)])
-                        if rows:
-                            kb = InlineKeyboardMarkup(inline_keyboard=rows)
+                        if (dm.get("button_text") or "").strip() and (dm.get("button_url") or "").strip():
+                            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                                InlineKeyboardButton(text=dm["button_text"], url=dm["button_url"])
+                            ]])
                         text_body = dm.get("text") or ""
                         mtype = (dm.get("media_type") or "none").lower()
                         mid = dm.get("media_file_id")
@@ -1633,13 +1754,13 @@ async def drip_worker(stop: asyncio.Event):
 
                         try:
                             if mtype == "video" and mid:
-                                await telegram_with_flood_retry(lambda u=uid, m=mid, t=text_body, k=kb, ce=cap_entities: bot.send_video(u, video=m, caption=t or None, reply_markup=k, caption_entities=ce))
+                                await telegram_with_flood_retry(lambda: bot.send_video(uid, video=mid, caption=text_body or None, reply_markup=kb, caption_entities=cap_entities))
                             elif mtype == "photo" and mid:
-                                await telegram_with_flood_retry(lambda u=uid, m=mid, t=text_body, k=kb, ce=cap_entities: bot.send_photo(u, photo=m, caption=t or None, reply_markup=k, caption_entities=ce))
+                                await telegram_with_flood_retry(lambda: bot.send_photo(uid, photo=mid, caption=text_body or None, reply_markup=kb, caption_entities=cap_entities))
                             elif mtype == "voice" and mid:
-                                await telegram_with_flood_retry(lambda u=uid, m=mid, t=text_body, k=kb, ce=cap_entities: bot.send_voice(u, voice=m, caption=t or None, reply_markup=k, caption_entities=ce))
+                                await telegram_with_flood_retry(lambda: bot.send_voice(uid, voice=mid, caption=text_body or None, reply_markup=kb, caption_entities=cap_entities))
                             else:
-                                await telegram_with_flood_retry(lambda u=uid, t=text_body, k=kb, me=msg_entities: bot.send_message(u, t, reply_markup=k, entities=me))
+                                await telegram_with_flood_retry(lambda: bot.send_message(uid, text_body, reply_markup=kb, entities=msg_entities))
                         except TelegramForbiddenError:
                             urow = await session.get(User, uid)
                             if urow:
@@ -1667,7 +1788,7 @@ async def drip_worker(stop: asyncio.Event):
             raise
         except Exception as e:
             logging.error("Drip worker error", exc_info=True)
-        await interruptible_sleep(60.0, stop)
+        await interruptible_sleep(300.0, stop)
 
 
 async def check_scheduled_posts(stop: asyncio.Event):
@@ -1709,37 +1830,70 @@ async def check_scheduled_posts(stop: asyncio.Event):
                                 InlineKeyboardButton(text=btn_t, url=btn_u)
                             ]])
 
+                        # Десериализуем entities для кастомных эмодзи
+                        parsed_entities = None
+                        if post.get("entities"):
+                            try:
+                                raw_ent = json.loads(post["entities"])
+                                parsed_entities = [MessageEntity(**e) for e in raw_ent] if raw_ent else None
+                            except Exception:
+                                pass
+
                         try:
                             mtype = (post.get("media_type") or "photo").lower()
                             mid = post.get("media_id")
-                            if post.get("post_type") == "paid":
-                                await telegram_with_flood_retry(lambda: bot.send_paid_media(
-                                    chat_id=target,
-                                    star_count=post["price"] or 0,
-                                    media=[InputPaidMediaPhoto(media=mid)],
-                                    caption=post.get("text"),
-                                    reply_markup=reply_markup,
-                                ))
+                            post_text = post.get("text")
+                            p_type = (post.get("post_type") or "free").lower()
+
+                            if p_type == "paid":
+                                # Валидация цены
+                                try:
+                                    star_count = int(post.get("price") or 0)
+                                except (TypeError, ValueError):
+                                    star_count = 0
+                                if star_count < 1:
+                                    logging.error(f"Post id={post_id}: invalid star_count={star_count!r}, skipping")
+                                    continue
+                                if not mid:
+                                    logging.error(f"Post id={post_id}: paid post has no media, skipping")
+                                    continue
+                                # Фото или видео
+                                if mtype == "video":
+                                    from aiogram.types import InputPaidMediaVideo
+                                    paid_media = [InputPaidMediaVideo(media=mid)]
+                                else:
+                                    paid_media = [InputPaidMediaPhoto(media=mid)]
+                                await telegram_with_flood_retry(
+                                    lambda t=target, sc=star_count, pm=paid_media, pt=post_text, rm=reply_markup, ce=parsed_entities:
+                                        bot.send_paid_media(
+                                            chat_id=t,
+                                            star_count=sc,
+                                            media=pm,
+                                            caption=pt,
+                                            caption_entities=ce,
+                                            reply_markup=rm,
+                                        )
+                                )
                             elif mid and mtype == "video":
-                                await telegram_with_flood_retry(lambda: bot.send_video(
-                                    chat_id=target, video=mid,
-                                    caption=post.get("text"), reply_markup=reply_markup,
-                                ))
+                                await telegram_with_flood_retry(
+                                    lambda t=target, m=mid, pt=post_text, rm=reply_markup, ce=parsed_entities:
+                                        bot.send_video(chat_id=t, video=m, caption=pt, caption_entities=ce, reply_markup=rm)
+                                )
                             elif mid and mtype == "voice":
-                                await telegram_with_flood_retry(lambda: bot.send_voice(
-                                    chat_id=target, voice=mid,
-                                    caption=post.get("text"), reply_markup=reply_markup,
-                                ))
+                                await telegram_with_flood_retry(
+                                    lambda t=target, m=mid, pt=post_text, rm=reply_markup, ce=parsed_entities:
+                                        bot.send_voice(chat_id=t, voice=m, caption=pt, caption_entities=ce, reply_markup=rm)
+                                )
                             elif mid:
-                                await telegram_with_flood_retry(lambda: bot.send_photo(
-                                    chat_id=target, photo=mid,
-                                    caption=post.get("text"), reply_markup=reply_markup,
-                                ))
-                            elif post.get("text"):
-                                await telegram_with_flood_retry(lambda: bot.send_message(
-                                    chat_id=target, text=post["text"],
-                                    reply_markup=reply_markup,
-                                ))
+                                await telegram_with_flood_retry(
+                                    lambda t=target, m=mid, pt=post_text, rm=reply_markup, ce=parsed_entities:
+                                        bot.send_photo(chat_id=t, photo=m, caption=pt, caption_entities=ce, reply_markup=rm)
+                                )
+                            elif post_text:
+                                await telegram_with_flood_retry(
+                                    lambda t=target, pt=post_text, rm=reply_markup, ent=parsed_entities:
+                                        bot.send_message(chat_id=t, text=pt, entities=ent, reply_markup=rm)
+                                )
                             else:
                                 logging.error(f"Post id={post_id} has no text or media, skipping")
                                 continue
@@ -1772,9 +1926,8 @@ async def run_migrations(connection):
     await connection.execute(text("ALTER TABLE content_queue ADD COLUMN IF NOT EXISTS button_text TEXT"))
     await connection.execute(text("ALTER TABLE content_queue ADD COLUMN IF NOT EXISTS button_url TEXT"))
     await connection.execute(text("ALTER TABLE content_queue ADD COLUMN IF NOT EXISTS media_type TEXT DEFAULT 'photo'"))
+    await connection.execute(text("ALTER TABLE content_queue ADD COLUMN IF NOT EXISTS entities TEXT"))
     await connection.execute(text("ALTER TABLE drip_messages ADD COLUMN IF NOT EXISTS entities TEXT"))
-    await connection.execute(text("ALTER TABLE drip_messages ADD COLUMN IF NOT EXISTS button2_text TEXT"))
-    await connection.execute(text("ALTER TABLE drip_messages ADD COLUMN IF NOT EXISTS button2_url TEXT"))
 
 
 async def main():
